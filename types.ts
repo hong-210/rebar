@@ -142,6 +142,56 @@ export interface Issue {
     isDeleted?: boolean; 
 }
 
+export type InspectionResult = 'Pending' | 'Pass' | 'Fail';
+export type InspectionType = 'Rebar' | 'Concrete' | 'Formwork' | 'Other';
+
+export interface Inspection {
+    id: string;
+    projectId: string;
+    dong: string;
+    floor: string;
+    zone: string;
+    type: InspectionType;
+    inspector: string; // 검측자
+    inspectionDate: string; // YYYY-MM-DD
+    result: InspectionResult;
+    note?: string;
+    attachment?: string;
+    createdAt: string;
+    isDeleted?: boolean;
+}
+
+export type PinStatus = 'Pending' | 'Confirmed';
+
+export interface DrawingPin {
+    id: string;
+    page: number; // 1-based page number
+    xPct: number; // 0-100, position on the page
+    yPct: number; // 0-100, position on the page
+    label: string;
+    status: PinStatus;
+    confirmedBy?: string;
+    confirmedAt?: string;
+}
+
+export interface ShopDrawing {
+    id: string; // Also used as the key for the PDF blob in IndexedDB
+    projectId: string;
+    dong: string;
+    floor?: string;
+    title: string;
+    fileName: string;
+    totalPages: number;
+    pins: DrawingPin[];
+    uploadedBy: string;
+    uploadedAt: string;
+
+    // Manual whole-document sign-off, independent of individual pin checks
+    completed?: boolean;
+    completedBy?: string;
+    completedAt?: string;
+}
+
 export type OrderStatus = 'RequestApproval' | 'Approved' | 'Rejected' | 'Ordered' | 'Delivered';
 
 export interface Order {

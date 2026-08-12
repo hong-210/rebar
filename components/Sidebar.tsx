@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, HardHat, ClipboardList, History, Sparkles, Settings, ArrowLeft, AlertCircle, Truck, CornerDownRight, Users, Box, Component } from 'lucide-react';
+import { LayoutDashboard, HardHat, ClipboardList, History, Sparkles, Settings, ArrowLeft, AlertCircle, Truck, CornerDownRight, Users, Box, Component, ClipboardCheck, FileText } from 'lucide-react';
 import { Project, User } from '../types';
 
 interface SidebarProps {
@@ -38,6 +38,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentProject, user, onExitPr
     const isConcreteOverviewActive = location.pathname === '/concrete';
     const isConcreteDesignActive = location.pathname === '/concrete/design';
     const isConcreteConstructionActive = location.pathname === '/concrete/construction';
+
+    // Check if we are in any inspection section
+    const isInspectionSection = location.pathname === '/inspection' || location.pathname.startsWith('/inspection/');
+    const isInspectionRecordsActive = location.pathname === '/inspection';
+    const isInspectionDrawingsActive = location.pathname === '/inspection/drawings';
 
     // Check Project Admin Role
     const userProjectRole = currentProject.members.find(m => m.userId === user.email)?.role || 'Guest';
@@ -158,19 +163,65 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentProject, user, onExitPr
                     )}
                 </div>
                 
-                {/* 5. 이슈 관리 */}
+                {/* 5. 검측 관리 */}
+                <div className="space-y-1">
+                    {/* Parent Item (Records) */}
+                    <Link
+                        to="/inspection"
+                        className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-all duration-200 ${
+                            isInspectionRecordsActive
+                            ? 'bg-blue-600 text-white shadow-md'
+                            : isInspectionSection
+                                ? 'text-blue-400 bg-slate-800/50' // Active parent style
+                                : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+                        }`}
+                    >
+                        <ClipboardCheck size={20} />
+                        <span className="font-medium">검측 관리</span>
+                    </Link>
+
+                    {/* Sub Menu */}
+                    {isInspectionSection && (
+                        <div className="ml-8 border-l-2 border-slate-700 pl-2 space-y-1 animate-in slide-in-from-top-2 duration-200">
+                            <Link
+                                to="/inspection"
+                                className={`flex items-center gap-2 py-2 px-3 text-sm rounded-md transition-colors ${
+                                    isInspectionRecordsActive
+                                    ? 'bg-slate-800 text-white font-semibold'
+                                    : 'text-slate-500 hover:text-slate-300'
+                                }`}
+                            >
+                                <CornerDownRight size={14} className="opacity-50" />
+                                검측 기록
+                            </Link>
+                            <Link
+                                to="/inspection/drawings"
+                                className={`flex items-center gap-2 py-2 px-3 text-sm rounded-md transition-colors ${
+                                    isInspectionDrawingsActive
+                                    ? 'bg-slate-800 text-white font-semibold'
+                                    : 'text-slate-500 hover:text-slate-300'
+                                }`}
+                            >
+                                <FileText size={14} className="opacity-50" />
+                                샵도면함
+                            </Link>
+                        </div>
+                    )}
+                </div>
+
+                {/* 6. 이슈 관리 */}
                 <NavItem to="/issues" icon={AlertCircle} label="이슈 관리" isActive={location.pathname === '/issues'} />
-                
-                {/* 6. 발주 관리 */}
+
+                {/* 7. 발주 관리 */}
                 <NavItem to="/orders" icon={Truck} label="발주 관리" isActive={location.pathname === '/orders'} />
-                
-                {/* 7. 이력 관리 */}
+
+                {/* 8. 이력 관리 */}
                 <NavItem to="/history" icon={History} label="이력 관리" isActive={location.pathname === '/history'} />
-                
-                {/* 8. 3D 뷰어 (Beta) */}
+
+                {/* 9. 3D 뷰어 (Beta) */}
                 <NavItem to="/3d-viewer" icon={Box} label="3D 모델 뷰어 (Beta)" isActive={location.pathname === '/3d-viewer'} />
 
-                {/* 9. 구성원 관리 (Admin Only) - Moved to bottom */}
+                {/* 10. 구성원 관리 (Admin Only) - Moved to bottom */}
                 {isAdmin && (
                     <>
                         <div className="h-px bg-slate-800 mx-2 my-2"></div>
