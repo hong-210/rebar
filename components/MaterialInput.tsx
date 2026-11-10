@@ -6,12 +6,24 @@ import { useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import { CouplerSummaryTable, isCoupler, formatEntryAmount } from './CouplerSummary';
 
+// 엑셀을 읽은 뒤 교체/덮어쓰기 선택을 기다리는 업로드
+interface PendingUpload {
+    entries: MaterialEntry[];
+    dataSource: 'Design' | 'Shop';
+    dongs: string[];
+    dongRowCounts: Record<string, number>;
+    affectedFloors: string[];
+    processedCount: number;
+    couplerRowCount: number;
+    existingCount: number; // 파일에 든 동들의 같은 구분 기존 물량 건수
+}
+
 interface MaterialInputProps {
     currentProject: Project;
     user: User;
     materials: MaterialEntry[];
     onAddMaterial: (material: MaterialEntry) => void;
-    onBatchAddMaterials: (materials: MaterialEntry[]) => BatchUploadResult;
+    onBatchAddMaterials: (materials: MaterialEntry[], replaceDongs?: string[]) => BatchUploadResult;
     onDeleteMaterial: (id: string) => void;
     onDeleteAllMaterials: (projectId: string, dataSource: 'Design' | 'Shop', dong: string) => void;
     onCreateVersion: (projectId: string, versionName: string, versionDate: string, dong: string) => void;
@@ -131,6 +143,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
     // Version Control UI State
     const [isCreateVerOpen, setIsCreateVerOpen] = useState(false);
     const [isCompareVerOpen, setIsCompareVerOpen] = useState(false);
+    const [pendingUpload, setPendingUpload] = useState<PendingUpload | null>(null);
     const [newVersionName, setNewVersionName] = useState('');
     const [newVersionDate, setNewVersionDate] = useState(new Date().toISOString().split('T')[0]);
     
@@ -368,6 +381,27 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             }
         }
         return floor; // Return original if unknown format
+    };
+
+    // 읽어 둔 엑셀 물량을 반영한다. replace면 파일에 든 동들의 같은 구분 기존 물량을 비우고 새로 채운다.
+    const applyUpload = (upload: PendingUpload, replace: boolean) => {
+        setPendingUpload(null);
+        const result = onBatchAddMaterials(upload.entries, replace ? upload.dongs : undefined);
+        setExpandedFloors(prev => {
+            const next = new Set(prev);
+            upload.affectedFloors.forEach(f => next.add(f));
+            return next;
+        });
+
+        const label = upload.dataSource === 'Design' ? '실행' : 'SHOP';
+        const dongSummary = Object.entries(upload.dongRowCounts).map(([d, c]) => `${d}: ${c}건`).join(', ');
+        const logicInfo = upload.dataSource === 'Shop' ? '\n(수평재 층 조정: Shop Floor - 1 적용됨)' : '';
+        const couplerInfo = upload.couplerRowCount > 0 ? `\n(그중 커플러 ${upload.couplerRowCount}행: '구성' 칸 기준, 개수(EA)로 따로 저장)` : '';
+        const applied = replace
+            ? `- 교체: 기존 ${label} 물량 ${result.cleared}건 삭제 후 ${result.created}건 새로 반영`
+            : `- 신규 ${result.created}건\n- 기존 물량 덮어쓰기 ${result.replaced}건 (같은 동/층/Zone/직경/강종은 누적하지 않음)`
+                + (result.duplicatesRemoved > 0 ? `\n- 이전 업로드로 중복 저장된 물량 ${result.duplicatesRemoved}건 정리` : '');
+        alert(`[${upload.dataSource} 모드] 처리 완료!${logicInfo}\n\n총 ${upload.processedCount}행 유효 데이터 -> ${upload.entries.length}개 항목으로 집계됨.${couplerInfo}\n(중량 단위: TON -> 내부 KG 변환 저장)\n\n[반영]\n${applied}\n\n[결과]\n${dongSummary}`);
     };
 
     // 엑셀의 동 이름을 프로젝트 기준 설정의 동과 맞춘다 ('101' / '101 동' -> '101동')
@@ -618,18 +652,25 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
         const newEntries = Array.from(aggregationMap.values());
 
         if (newEntries.length > 0) {
-            const result = onBatchAddMaterials(newEntries);
-            setExpandedFloors(prev => {
-                const next = new Set(prev);
-                affectedFloors.forEach(f => next.add(f));
-                return next;
-            });
-            
-            const dongSummary = Object.entries(targetDongCounts).map(([d, c]) => `${d}: ${c}건`).join(', ');
-            const logicInfo = dataSource === 'Shop' ? '\n(수평재 층 조정: Shop Floor - 1 적용됨)' : '';
-            const couplerInfo = couplerRowCount > 0 ? `\n(그중 커플러 ${couplerRowCount}행: '구성' 칸 기준, 개수(EA)로 따로 저장)` : '';
-            const duplicateInfo = result.duplicatesRemoved > 0? `\n- 이전 업로드로 중복 저장된 물량 ${result.duplicatesRemoved}건 정리` : '';
-            alert(`[${dataSource} 모드] 처리 완료!${logicInfo}\n\n총 ${processedCount}행 유효 데이터 -> ${newEntries.length}개 항목으로 집계됨.${couplerInfo}\n(중량 단위: TON -> 내부 KG 변환 저장)\n\n[반영]\n- 신규 ${result.created}건\n- 기존 물량 덮어쓰기 ${result.replaced}건 (같은 동/층/Zone/직경/강종은 누적하지 않음)${duplicateInfo}\n\n[결과]\n${dongSummary}`);
+            const upload: PendingUpload = {
+                entries: newEntries,
+                dataSource,
+                dongs: Object.keys(targetDongCounts),
+                dongRowCounts: targetDongCounts,
+                affectedFloors: Array.from(affectedFloors),
+                processedCount,
+                couplerRowCount,
+                existingCount: 0
+            };
+            upload.existingCount = materials.filter(m =>
+                m.projectId === currentProject.id &&
+                upload.dongs.includes(m.dong) &&
+                (m.dataSource ?? 'Design') === dataSource
+            ).length;
+
+            // 파일에 든 동에 기존 물량이 있으면 교체할지 덮어쓸지 고르게 한다
+            if (upload.existingCount > 0) setPendingUpload(upload);
+            else applyUpload(upload, false);
         } else {
             const requiredKeys = isDesignMode 
                 ? `필수 컬럼: ${config.zone[0]}, ${config.weight[0]}, ${config.floor[0]}, ${config.dia[0]}`
@@ -1178,6 +1219,48 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             </div>
 
             {/* Create Version Modal */}
+            {pendingUpload && canEdit && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-md">
+                        <div className="p-6">
+                            <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2">
+                                <UploadCloud size={18} className="text-blue-600" />
+                                {pendingUpload.dataSource === 'Design' ? '실행 물량' : 'SHOP 물량'} 업로드 방식 선택
+                            </h3>
+                            <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-600 mb-4 space-y-1">
+                                <p><span className="font-bold">파일에 든 동:</span> {pendingUpload.dongs.join(', ')}</p>
+                                <p><span className="font-bold">파일 물량:</span> {pendingUpload.entries.length.toLocaleString()}개 항목</p>
+                                <p><span className="font-bold">이 동들의 기존 {pendingUpload.dataSource === 'Design' ? '실행' : 'SHOP'} 물량:</span> {pendingUpload.existingCount.toLocaleString()}건</p>
+                            </div>
+                            <div className="space-y-2">
+                                <button
+                                    onClick={() => applyUpload(pendingUpload, true)}
+                                    className="w-full text-left px-4 py-3 rounded-lg bg-blue-600 text-white hover:bg-blue-700"
+                                >
+                                    <span className="block font-bold text-sm">교체</span>
+                                    <span className="block text-xs text-blue-100">위 동들의 기존 {pendingUpload.dataSource === 'Design' ? '실행' : 'SHOP'} 물량을 모두 지우고 파일 내용으로 새로 채웁니다. 커플러 구분 등 이전 데이터를 바로잡을 때 사용하세요.</span>
+                                    {pendingUpload.dataSource === 'Design' && (
+                                        <span className="block text-xs text-amber-200 mt-1">버전별(Rev) 물량 기록도 함께 지워집니다.</span>
+                                    )}
+                                </button>
+                                <button
+                                    onClick={() => applyUpload(pendingUpload, false)}
+                                    className="w-full text-left px-4 py-3 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50"
+                                >
+                                    <span className="block font-bold text-sm">덮어쓰기</span>
+                                    <span className="block text-xs text-slate-500">같은 동/층/Zone/직경/강종 물량만 새 값으로 바꾸고, 파일에 없는 기존 물량은 그대로 둡니다.</span>
+                                </button>
+                            </div>
+                            <div className="flex justify-end mt-4">
+                                <button onClick={() => setPendingUpload(null)} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg text-sm">
+                                    취소 (반영하지 않음)
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {isCreateVerOpen && canEdit && (
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
                     <div className="bg-white rounded-xl shadow-2xl w-full max-w-md">

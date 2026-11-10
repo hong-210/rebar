@@ -358,15 +358,24 @@ export default function App() {
     // 엑셀 일괄 업로드. 같은 파일을 다시 올려도 물량이 누적되지 않도록
     // 동/층/Zone/직경/강종/구분이 같은 기존 물량은 더하지 않고 새 값으로 덮어쓴다.
     // 이전 업로드로 같은 키의 행이 여러 개 쌓여 있었다면 하나만 남기고 정리한다.
-    const handleBatchAddMaterials = (entries: MaterialEntry[]): BatchUploadResult => {
-        const result: BatchUploadResult = { created: 0, replaced: 0, duplicatesRemoved: 0 };
+    // replaceDongs를 주면(교체 업로드) 그 동들의 같은 구분(실행/SHOP) 기존 물량을 모두 비우고 파일 내용으로 새로 채운다.
+    const handleBatchAddMaterials = (entries: MaterialEntry[], replaceDongs?: string[]): BatchUploadResult => {
+        const result: BatchUploadResult = { created: 0, replaced: 0, duplicatesRemoved: 0, cleared: 0 };
         if (entries.length === 0) return result;
+
+        const source = entries[0].dataSource ?? 'Design';
+        const clearDongs = new Set(replaceDongs ?? []);
+        const isCleared = (m: MaterialEntry) =>
+            m.projectId === entries[0].projectId && clearDongs.has(m.dong) && (m.dataSource ?? 'Design') === source;
+        const clearedIds = materials.filter(isCleared).map(m => m.id);
+        result.cleared = clearedIds.length;
+        const base = materials.filter(m => !isCleared(m));
 
         const keyOf = (m: MaterialEntry) =>
             [m.projectId, m.dong, m.floor, m.zone, m.diameter, m.strength, m.dataSource ?? 'Design', m.itemType ?? 'Rebar'].join('|');
 
         const existingByKey = new Map<string, MaterialEntry[]>();
-        materials.forEach(m => {
+        base.forEach(m => {
             const key = keyOf(m);
             existingByKey.set(key, [...(existingByKey.get(key) ?? []), m]);
         });
@@ -402,18 +411,22 @@ export default function App() {
 
         const removed = new Set(removedIds);
         setMaterials([
-            ...materials.filter(m => !removed.has(m.id)).map(m => replacements.get(m.id) ?? m),
+            ...base.filter(m => !removed.has(m.id)).map(m => replacements.get(m.id) ?? m),
             ...added
         ]);
         persist((async () => {
-            if (removedIds.length > 0) await materialsTable.removeMany(removedIds);
+            const toRemove = [...clearedIds, ...removedIds];
+            if (toRemove.length > 0) await materialsTable.removeMany(toRemove);
             await materialsTable.upsert([...replacements.values(), ...added]);
         })());
 
         const dongList = Array.from(affectedDongs).join(', ');
         const duplicateInfo = result.duplicatesRemoved > 0 ? `, 중복 ${result.duplicatesRemoved}건 정리` : '';
-        addLog(entries[0].projectId, 'IMPORT',
-            `철근 엑셀 데이터 일괄 업로드 (신규 ${result.created}건, 덮어쓰기 ${result.replaced}건${duplicateInfo}) - ${dongList}`);
+        const label = source === 'Design' ? '실행' : 'SHOP';
+        const summary = replaceDongs
+            ? `교체 업로드 - 기존 ${label} ${result.cleared}건 삭제 후 ${result.created}건 반영`
+            : `신규 ${result.created}건, 덮어쓰기 ${result.replaced}건${duplicateInfo}`;
+        addLog(entries[0].projectId, 'IMPORT', `철근 엑셀 데이터 일괄 업로드 (${summary}) - ${dongList}`);
         return result;
     };
 
