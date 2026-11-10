@@ -5,6 +5,7 @@ import { Plus, Trash2, Calculator, FileSpreadsheet, UploadCloud, Building, GitBr
 import { useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import { CouplerSummaryTable, isCoupler, formatEntryAmount } from './CouplerSummary';
+import { normalizeRebarSpec } from '../utils/rebarSpec';
 
 // 엑셀을 읽은 뒤 교체/덮어쓰기 선택을 기다리는 업로드
 interface PendingUpload {
@@ -374,6 +375,8 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             ['중량 / 개수', '철근은 중량(ton), 커플러는 개수(EA)를 같은 칸에 적습니다.'],
             ['동 / 층', '프로젝트 설정에 있는 동 이름과 층 범위 안이어야 업로드됩니다. (예: 4F, B1)'],
             ['직경', '커플러도 직경(예: 25)을 적어야 합니다. 직경이 없는 행은 건너뜁니다.'],
+            ['내진(S)', "직경에 S를 붙이거나(D22S) 강종에 붙이면(SD600S) 모두 'D22 / SD600S'로 같게 반영됩니다. 강종 숫자 없이 S만 적거나(강종 'S') 직경에만 S가 있으면(22S) '미기재(S)'로 반영됩니다."],
+            ['강종', "적으면 철근·커플러 모두 그대로 반영됩니다. 비워 두면 '미기재'로 표시됩니다."],
             ...(isShop ? [['구분', "보·슬래브 등 수평재는 '수평'으로 적으면 한 층 아래로 집계됩니다."]] : [])
         ]);
         guide['!cols'] = [{wch: 14}, {wch: 70}];
@@ -539,19 +542,15 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             // In Shop mode, default to General if missing. In Design, default to General.
             const zone = zoneRaw || 'General';
 
-            // DIAMETER PARSING (D10S -> D10)
-            const diaRaw = getValue(config.dia);
-            let diaEnum: RebarDiameter | undefined;
-            if (diaRaw !== null) {
-                // Remove non-digits (remove 'D', 'S', 'mm', etc.)
-                const sizeStr = String(diaRaw).replace(/[^0-9]/g, '');
-                if (sizeStr) {
-                    const normalizedDia = `D${sizeStr}`;
-                    diaEnum = Object.values(RebarDiameter).find(d => d === normalizedDia);
-                }
-            }
+            // '구성' 칸에 커플러라고 적힌 행은 철근이 아니라 커플러이고, 값은 개수(EA)다
+            // SHOP 업체가 커플러를 '구분' 칸에 적는 경우도 함께 본다
+            const isCouplerRow = /커플러|coupler/i.test(`${getValue(config.component) ?? ''} ${getValue(config.standard) ?? ''}`);
+            const itemType = isCouplerRow ? 'Coupler' : 'Rebar';
 
-            const strengthVal = getValue(config.strength) || 'SD400';
+            // DIAMETER / GRADE PARSING
+            // 'D22S'처럼 직경에 붙은 내진 표시 S는 강종으로 옮긴다 (SHOP D22S + SD600 -> D22 / SD600S, 실행과 같은 기준)
+            const { diameter: diaEnum, strength: cleanStrength } =
+                normalizeRebarSpec(getValue(config.dia), getValue(config.strength));
 
             // WEIGHT PARSING (Handle commas: "1,200")
             const rawWeight = getValue(config.weight);
@@ -580,12 +579,6 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             const cleanDong = building.name;
             const cleanZone = String(zone);
 
-            // '구성' 칸에 커플러라고 적힌 행은 철근이 아니라 커플러이고, 값은 개수(EA)다
-            // SHOP 업체가 커플러를 '구분' 칸에 적는 경우도 함께 본다
-            const isCouplerRow = /커플러|coupler/i.test(`${getValue(config.component) ?? ''} ${getValue(config.standard) ?? ''}`);
-            const itemType = isCouplerRow ? 'Coupler' : 'Rebar';
-            const cleanStrength = String(strengthVal);
-            
             // --- Floor Adjustment Logic for Shop Horizontal Members ---
             let cleanFloor = String(floor);
             
@@ -931,7 +924,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
 
                         {/* Diameter Summary */}
                         <DiameterSummaryTable data={aggregateByDiameter(dongMaterials)} title={`${selectedDong} 전체 직경별 집계`} />
-                        <CouplerSummaryTable items={dongMaterials} title={`${selectedDong} 커플러 직경별 집계`} />
+                        <CouplerSummaryTable items={dongMaterials} title={`${selectedDong} 커플러 직경·강종별 집계`} />
 
                         {/* Floor Progress List */}
                         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">

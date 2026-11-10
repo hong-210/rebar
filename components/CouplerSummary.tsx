@@ -1,20 +1,24 @@
 import React from 'react';
 import { Link2 } from 'lucide-react';
 import { MaterialEntry } from '../types';
+import { UNKNOWN_GRADE } from '../utils/rebarSpec';
 
 export const isCoupler = (m: MaterialEntry) => m.itemType === 'Coupler';
 
-// 커플러는 개수(EA)로 관리하므로 철근 ton 집계와 따로 직경별로 모은다.
+// 커플러는 개수(EA)로 관리하므로 철근 ton 집계와 따로 직경 + 강종별로 모은다.
 const aggregateCouplers = (items: MaterialEntry[]) => {
-    const map = new Map<string, { diameter: string, planned: number, shop: number }>();
+    const map = new Map<string, { diameter: string, strength: string, planned: number, shop: number }>();
     items.filter(isCoupler).forEach(m => {
-        const row = map.get(m.diameter) ?? { diameter: m.diameter, planned: 0, shop: 0 };
+        const key = `${m.diameter}-${m.strength}`;
+        const row = map.get(key) ?? { diameter: m.diameter, strength: m.strength, planned: 0, shop: 0 };
         if (m.dataSource === 'Shop') row.shop += m.shopQuantity;
         else row.planned += m.plannedQuantity;
-        map.set(m.diameter, row);
+        map.set(key, row);
     });
     return Array.from(map.values())
-        .sort((a, b) => parseInt(a.diameter.replace(/\D/g, '')) - parseInt(b.diameter.replace(/\D/g, '')));
+        .sort((a, b) =>
+            parseInt(a.diameter.replace(/\D/g, '')) - parseInt(b.diameter.replace(/\D/g, ''))
+            || a.strength.localeCompare(b.strength));
 };
 
 const formatEa = (n: number) => `${Math.round(n).toLocaleString()} EA`;
@@ -43,6 +47,7 @@ export const CouplerSummaryTable: React.FC<{ items: MaterialEntry[], title: stri
                     <thead className="bg-slate-50 text-slate-500 font-medium border-b border-slate-200">
                         <tr>
                             <th className="px-4 py-2 text-left">Diameter</th>
+                            <th className="px-4 py-2 text-center">Strength</th>
                             <th className="px-4 py-2 text-slate-600">실행 (EA)</th>
                             <th className="px-4 py-2 text-blue-600">SHOP (EA)</th>
                             <th className="px-4 py-2">차이 (EA)</th>
@@ -50,15 +55,16 @@ export const CouplerSummaryTable: React.FC<{ items: MaterialEntry[], title: stri
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                         {rows.map(r => (
-                            <tr key={r.diameter} className="hover:bg-slate-50">
+                            <tr key={`${r.diameter}-${r.strength}`} className="hover:bg-slate-50">
                                 <td className="px-4 py-2 text-left font-bold text-slate-700">{r.diameter}</td>
+                                <td className={`px-4 py-2 text-center text-xs ${r.strength.startsWith(UNKNOWN_GRADE) ? 'text-slate-400' : 'text-slate-500'}`}>{r.strength}</td>
                                 <td className="px-4 py-2 text-slate-600">{Math.round(r.planned).toLocaleString()}</td>
                                 <td className="px-4 py-2 text-blue-700 font-bold">{Math.round(r.shop).toLocaleString()}</td>
                                 {deltaCell(r.shop - r.planned)}
                             </tr>
                         ))}
                         <tr className="font-bold bg-slate-100/50 border-t border-slate-200">
-                            <td className="px-4 py-3 text-left">합계 (Total)</td>
+                            <td className="px-4 py-3 text-left" colSpan={2}>합계 (Total)</td>
                             <td className="px-4 py-3">{formatEa(totalPlanned)}</td>
                             <td className="px-4 py-3 text-blue-700">{formatEa(totalShop)}</td>
                             {deltaCell(totalShop - totalPlanned, true)}

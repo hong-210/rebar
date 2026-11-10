@@ -253,6 +253,7 @@ ${inviteText}`);
                 '층': m.floor,
                 'Zone / 도면명': m.zone,
                 '직경': m.diameter,
+                '강종': m.strength,
                 '수량 (EA)': m.dataSource === 'Shop' ? m.shopQuantity : m.plannedQuantity,
                 '업데이트': m.lastUpdated
             }));
@@ -277,7 +278,7 @@ ${inviteText}`);
 
         if (couplerData.length > 0) {
             const wsCoupler = XLSX.utils.json_to_sheet(couplerData);
-            wsCoupler['!cols'] = [{wch: 8}, {wch: 15}, {wch: 10}, {wch: 20}, {wch: 10}, {wch: 12}, {wch: 15}];
+            wsCoupler['!cols'] = [{wch: 8}, {wch: 15}, {wch: 10}, {wch: 20}, {wch: 10}, {wch: 10}, {wch: 12}, {wch: 15}];
             XLSX.utils.book_append_sheet(wb, wsCoupler, "커플러 상세 (EA)");
         }
 
@@ -396,7 +397,7 @@ ${inviteText}`);
                 </div>
             )}
 
-            <CouplerSummaryTable items={couplerMaterials} title="프로젝트 전체 커플러 직경별 집계" />
+            <CouplerSummaryTable items={couplerMaterials} title="프로젝트 전체 커플러 직경·강종별 집계" />
 
             {projectMaterials.length > 0 ? (
                 <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
