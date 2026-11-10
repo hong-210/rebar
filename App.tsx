@@ -21,7 +21,7 @@ import { ShopDrawingBox } from './components/ShopDrawingBox';
 import { OrderManagement } from './components/OrderManagement';
 import { MemberManagement } from './components/MemberManagement';
 import { ThreeDViewer } from './components/ThreeDViewer';
-import { Project, MaterialEntry, ConcreteEntry, HistoryLog, User, Issue, IssueStatus, Order, OrderStatus, ProjectRole, Inspection, InspectionResult, ShopDrawing } from './types';
+import { Project, MaterialEntry, ConcreteEntry, HistoryLog, User, Issue, IssueStatus, Order, OrderStatus, ProjectRole, Inspection, InspectionResult, ShopDrawing, BatchUploadResult } from './types';
 
 const errorMessage = (err: unknown) =>
     err && typeof err === 'object' && 'message' in err ? String((err as { message: unknown }).message) : String(err);
@@ -354,10 +354,25 @@ export default function App() {
         }
     };
 
-    const handleBatchAddMaterials = (entries: MaterialEntry[]) => {
-        if (entries.length === 0) return;
-        
-        const newMaterials = [...materials];
+    // 엑셀 일괄 업로드. 같은 파일을 다시 올려도 물량이 누적되지 않도록
+    // 동/층/Zone/직경/강종/구분이 같은 기존 물량은 더하지 않고 새 값으로 덮어쓴다.
+    // 이전 업로드로 같은 키의 행이 여러 개 쌓여 있었다면 하나만 남기고 정리한다.
+    const handleBatchAddMaterials = (entries: MaterialEntry[]): BatchUploadResult => {
+        const result: BatchUploadResult = { created: 0, replaced: 0, duplicatesRemoved: 0 };
+        if (entries.length === 0) return result;
+
+        const keyOf = (m: MaterialEntry) =>
+            [m.projectId, m.dong, m.floor, m.zone, m.diameter, m.strength, m.dataSource ?? 'Design'].join('|');
+
+        const existingByKey = new Map<string, MaterialEntry[]>();
+        materials.forEach(m => {
+            const key = keyOf(m);
+            existingByKey.set(key, [...(existingByKey.get(key) ?? []), m]);
+        });
+
+        const replacements = new Map<string, MaterialEntry>(); // 덮어쓸 기존 행 id -> 새 행
+        const removedIds: string[] = [];
+        const added: MaterialEntry[] = [];
         const affectedDongs = new Set<string>();
 
         entries.forEach(entry => {
@@ -365,14 +380,40 @@ export default function App() {
             if (entry.dataSource !== 'Shop') {
                 entry.plannedVersions = { [activeVer]: entry.plannedWeight };
             }
-            newMaterials.push(entry);
             affectedDongs.add(entry.dong);
+
+            const [first, ...extras] = existingByKey.get(keyOf(entry)) ?? [];
+            if (!first) {
+                added.push(entry);
+                result.created++;
+                return;
+            }
+            // 기존 행 id를 유지하고, 다른 버전(Rev)의 실행 물량 기록은 보존한다
+            replacements.set(first.id, {
+                ...entry,
+                id: first.id,
+                plannedVersions: { ...first.plannedVersions, ...entry.plannedVersions }
+            });
+            result.replaced++;
+            extras.forEach(m => removedIds.push(m.id));
+            result.duplicatesRemoved += extras.length;
         });
 
-        setMaterials(newMaterials);
-        persist(materialsTable.insert(entries));
+        const removed = new Set(removedIds);
+        setMaterials([
+            ...materials.filter(m => !removed.has(m.id)).map(m => replacements.get(m.id) ?? m),
+            ...added
+        ]);
+        persist((async () => {
+            if (removedIds.length > 0) await materialsTable.removeMany(removedIds);
+            await materialsTable.upsert([...replacements.values(), ...added]);
+        })());
+
         const dongList = Array.from(affectedDongs).join(', ');
-        addLog(entries[0].projectId, 'IMPORT', `철근 엑셀 데이터 일괄 업로드 (${entries.length}건) - ${dongList}`);
+        const duplicateInfo = result.duplicatesRemoved > 0 ? `, 중복 ${result.duplicatesRemoved}건 정리` : '';
+        addLog(entries[0].projectId, 'IMPORT',
+            `철근 엑셀 데이터 일괄 업로드 (신규 ${result.created}건, 덮어쓰기 ${result.replaced}건${duplicateInfo}) - ${dongList}`);
+        return result;
     };
 
     const handleDeleteMaterial = (id: string) => {

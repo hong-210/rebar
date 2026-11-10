@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { MaterialEntry, Project, RebarDiameter, User } from '../types';
+import { MaterialEntry, Project, RebarDiameter, User, BuildingConfig, BatchUploadResult } from '../types';
 import { Plus, Trash2, Calculator, FileSpreadsheet, UploadCloud, Building, GitBranch, ArrowRightLeft, X, Calendar, Download, BarChart3, Truck, Info, ChevronDown, ChevronRight, ChevronUp, Scale, Lock } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
@@ -10,7 +10,7 @@ interface MaterialInputProps {
     user: User;
     materials: MaterialEntry[];
     onAddMaterial: (material: MaterialEntry) => void;
-    onBatchAddMaterials: (materials: MaterialEntry[]) => void;
+    onBatchAddMaterials: (materials: MaterialEntry[]) => BatchUploadResult;
     onDeleteMaterial: (id: string) => void;
     onDeleteAllMaterials: (projectId: string, dataSource: 'Design' | 'Shop', dong: string) => void;
     onCreateVersion: (projectId: string, versionName: string, versionDate: string, dong: string) => void;
@@ -368,6 +368,22 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
         return floor; // Return original if unknown format
     };
 
+    // 엑셀의 동 이름을 프로젝트 기준 설정의 동과 맞춘다 ('101' / '101 동' -> '101동')
+    const findBuilding = (rawDong: string): BuildingConfig | undefined => {
+        const normalize = (s: string) => s.replace(/\s/g, '').replace(/동$/, '').toUpperCase();
+        return currentProject.buildings.find(b => b.name === rawDong)
+            ?? currentProject.buildings.find(b => normalize(b.name) === normalize(rawDong));
+    };
+
+    // 기준 설정의 층 범위(B{지하층수}~B1, 1F~{지상층수}F) 안에 있는지
+    const isFloorInBuilding = (building: BuildingConfig, floor: string) => {
+        const basement = floor.match(/^B(\d+)$/);
+        if (basement) return Number(basement[1]) >= 1 && Number(basement[1]) <= building.basementFloors;
+        const ground = floor.match(/^(\d+)F$/);
+        if (ground) return Number(ground[1]) >= 1 && Number(ground[1]) <= building.groundFloors;
+        return false; // PH, R 등 기준 설정에 없는 층
+    };
+
     const processExcelData = (data: any[]) => {
         let processedCount = 0;
         const affectedFloors = new Set<string>();
@@ -404,6 +420,10 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
         };
 
         const targetDongCounts: Record<string, number> = {};
+
+        // 기준 설정과 맞지 않는 행 (사유 -> 행 수). 하나라도 있으면 업로드 전체를 막는다.
+        const rejected = new Map<string, number>();
+        const rejectRow = (reason: string) => rejected.set(reason, (rejected.get(reason) ?? 0) + 1);
 
         data.forEach((row: any) => {
             const getValue = (keywords: string[]) => {
@@ -484,80 +504,106 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                  if (isNaN(valueWeight)) valueWeight = 0;
             }
 
-            // FILTER: Must have Floor, Valid Diameter, and Weight > 0
-            if (floor && diaEnum && (valueWeight > 0)) {
-                const cleanDong = String(dongStr);
-                const cleanZone = String(zone);
-                const cleanStrength = String(strengthVal);
-                
-                // --- Floor Adjustment Logic for Shop Horizontal Members ---
-                let cleanFloor = String(floor);
-                
-                if (dataSource === 'Shop') {
-                    const standardVal = getValue(config.standard) || '';
-                    const stdStr = String(standardVal).toLowerCase();
-                    const isHorizontal = stdStr.includes('수평') || stdStr.includes('horizontal') || stdStr.includes('slab') || stdStr.includes('beam') || stdStr.includes('보') || stdStr.includes('슬래브');
-                    
-                    if (isHorizontal) {
-                        cleanFloor = getShiftedFloor(cleanFloor);
-                    }
-                }
-                // ----------------------------------------------------------
+            // 직경이나 중량이 없는 행(빈 행, 합계 행 등)은 물량이 아니므로 건너뛴다
+            if (!diaEnum || !(valueWeight > 0)) return;
 
-                // Convert Input TON to KG
-                const weightKg = valueWeight * 1000;
-
-                const uniqueKey = `${cleanDong}|${cleanFloor}|${cleanZone}|${diaEnum}|${cleanStrength}`;
-
-                if (aggregationMap.has(uniqueKey)) {
-                    const existingEntry = aggregationMap.get(uniqueKey)!;
-                    if (dataSource === 'Design') {
-                        existingEntry.plannedWeight += weightKg;
-                    } else {
-                        existingEntry.shopWeight += weightKg;
-                    }
-                    // Round to 2 decimals to avoid float errors
-                    existingEntry.plannedWeight = Math.round(existingEntry.plannedWeight * 100) / 100;
-                    existingEntry.shopWeight = Math.round(existingEntry.shopWeight * 100) / 100;
-                } else {
-                    let pWeight = 0; let sWeight = 0;
-                    if (dataSource === 'Design') pWeight = weightKg;
-                    else sWeight = weightKg;
-
-                    const newEntry: MaterialEntry = {
-                        id: Math.random().toString(36).substr(2, 9),
-                        projectId: currentProject.id,
-                        dong: cleanDong,
-                        floor: cleanFloor,
-                        zone: cleanZone,
-                        diameter: diaEnum,
-                        strength: cleanStrength,
-                        lengthMm: 0,
-                        dataSource: dataSource,
-                        plannedQuantity: 0, 
-                        plannedWeight: Number(pWeight.toFixed(2)),
-                        shopQuantity: 0,
-                        shopWeight: Number(sWeight.toFixed(2)),
-                        plannedVersions: {},
-                        lastUpdated: new Date().toLocaleDateString()
-                    };
-                    aggregationMap.set(uniqueKey, newEntry);
-                }
-
-                processedCount++;
-                if (cleanDong === selectedDong) {
-                    affectedFloors.add(cleanFloor);
-                }
-                
-                if (!targetDongCounts[cleanDong]) targetDongCounts[cleanDong] = 0;
-                targetDongCounts[cleanDong]++;
+            // 동/층이 프로젝트 기준 설정과 맞는지 확인한다
+            const rawDong = String(dongStr ?? '').trim();
+            const building = findBuilding(rawDong);
+            if (!building) {
+                rejectRow(`동 '${rawDong || '(빈칸)'}': 기준 설정에 없는 동`);
+                return;
             }
+            if (!floor) {
+                rejectRow(`${building.name} 층 '${floorRaw ?? '(빈칸)'}': 인식할 수 없는 층 표기`);
+                return;
+            }
+
+            const cleanDong = building.name;
+            const cleanZone = String(zone);
+            const cleanStrength = String(strengthVal);
+            
+            // --- Floor Adjustment Logic for Shop Horizontal Members ---
+            let cleanFloor = String(floor);
+            
+            if (dataSource === 'Shop') {
+                const standardVal = getValue(config.standard) || '';
+                const stdStr = String(standardVal).toLowerCase();
+                const isHorizontal = stdStr.includes('수평') || stdStr.includes('horizontal') || stdStr.includes('slab') || stdStr.includes('beam') || stdStr.includes('보') || stdStr.includes('슬래브');
+                
+                if (isHorizontal) {
+                    cleanFloor = getShiftedFloor(cleanFloor);
+                }
+            }
+            // ----------------------------------------------------------
+
+            if (!isFloorInBuilding(building, cleanFloor)) {
+                const shiftNote = cleanFloor !== floor ? ` (엑셀 ${floor} 수평재 → 한 층 아래 ${cleanFloor})` : '';
+                rejectRow(`${cleanDong} ${cleanFloor}${shiftNote}: 기준 설정 범위(지하 ${building.basementFloors}층 ~ 지상 ${building.groundFloors}층) 밖`);
+                return;
+            }
+
+            // Convert Input TON to KG
+            const weightKg = valueWeight * 1000;
+
+            const uniqueKey = `${cleanDong}|${cleanFloor}|${cleanZone}|${diaEnum}|${cleanStrength}`;
+
+            if (aggregationMap.has(uniqueKey)) {
+                const existingEntry = aggregationMap.get(uniqueKey)!;
+                if (dataSource === 'Design') {
+                    existingEntry.plannedWeight += weightKg;
+                } else {
+                    existingEntry.shopWeight += weightKg;
+                }
+                // Round to 2 decimals to avoid float errors
+                existingEntry.plannedWeight = Math.round(existingEntry.plannedWeight * 100) / 100;
+                existingEntry.shopWeight = Math.round(existingEntry.shopWeight * 100) / 100;
+            } else {
+                let pWeight = 0; let sWeight = 0;
+                if (dataSource === 'Design') pWeight = weightKg;
+                else sWeight = weightKg;
+
+                const newEntry: MaterialEntry = {
+                    id: Math.random().toString(36).substr(2, 9),
+                    projectId: currentProject.id,
+                    dong: cleanDong,
+                    floor: cleanFloor,
+                    zone: cleanZone,
+                    diameter: diaEnum,
+                    strength: cleanStrength,
+                    lengthMm: 0,
+                    dataSource: dataSource,
+                    plannedQuantity: 0, 
+                    plannedWeight: Number(pWeight.toFixed(2)),
+                    shopQuantity: 0,
+                    shopWeight: Number(sWeight.toFixed(2)),
+                    plannedVersions: {},
+                    lastUpdated: new Date().toLocaleDateString()
+                };
+                aggregationMap.set(uniqueKey, newEntry);
+            }
+
+            processedCount++;
+            if (cleanDong === selectedDong) {
+                affectedFloors.add(cleanFloor);
+            }
+            
+            if (!targetDongCounts[cleanDong]) targetDongCounts[cleanDong] = 0;
+            targetDongCounts[cleanDong]++;
         });
+
+        if (rejected.size > 0) {
+            const total = Array.from(rejected.values()).reduce((a, c) => a + c, 0);
+            const lines = Array.from(rejected.entries()).map(([reason, count]) => `- ${reason} (${count}행)`);
+            const shown = lines.slice(0, 15).join('\n') + (lines.length > 15 ? `\n... 외 ${lines.length - 15}종류` : '');
+            alert(`업로드를 중단했습니다. 이 파일의 물량은 하나도 반영되지 않았습니다.\n\n프로젝트 기준 설정과 맞지 않는 행이 ${total}행 있습니다.\n${shown}\n\n프로젝트 설정에서 동/층수를 맞추거나 엑셀을 수정한 뒤 다시 올려주세요.`);
+            return;
+        }
 
         const newEntries = Array.from(aggregationMap.values());
 
         if (newEntries.length > 0) {
-            onBatchAddMaterials(newEntries);
+            const result = onBatchAddMaterials(newEntries);
             setExpandedFloors(prev => {
                 const next = new Set(prev);
                 affectedFloors.forEach(f => next.add(f));
@@ -566,7 +612,8 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             
             const dongSummary = Object.entries(targetDongCounts).map(([d, c]) => `${d}: ${c}건`).join(', ');
             const logicInfo = dataSource === 'Shop' ? '\n(수평재 층 조정: Shop Floor - 1 적용됨)' : '';
-            alert(`[${dataSource} 모드] 처리 완료!${logicInfo}\n\n총 ${processedCount}행 유효 데이터 -> ${newEntries.length}개 항목으로 집계됨.\n(중량 단위: TON -> 내부 KG 변환 저장)\n\n[결과]\n${dongSummary}`);
+            const duplicateInfo = result.duplicatesRemoved > 0 ? `\n- 이전 업로드로 중복 저장된 물량 ${result.duplicatesRemoved}건 정리` : '';
+            alert(`[${dataSource} 모드] 처리 완료!${logicInfo}\n\n총 ${processedCount}행 유효 데이터 -> ${newEntries.length}개 항목으로 집계됨.\n(중량 단위: TON -> 내부 KG 변환 저장)\n\n[반영]\n- 신규 ${result.created}건\n- 기존 물량 덮어쓰기 ${result.replaced}건 (같은 동/층/Zone/직경/강종은 누적하지 않음)${duplicateInfo}\n\n[결과]\n${dongSummary}`);
         } else {
             const requiredKeys = isDesignMode 
                 ? `필수 컬럼: ${config.zone[0]}, ${config.weight[0]}, ${config.floor[0]}, ${config.dia[0]}`
