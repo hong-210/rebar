@@ -4,6 +4,7 @@ import { MaterialEntry, Project, RebarDiameter, User, BuildingConfig, BatchUploa
 import { Plus, Trash2, Calculator, FileSpreadsheet, UploadCloud, Building, GitBranch, ArrowRightLeft, X, Calendar, Download, BarChart3, Truck, Info, ChevronDown, ChevronRight, ChevronUp, Scale, Lock } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
+import { CouplerSummaryTable, isCoupler, formatEntryAmount } from './CouplerSummary';
 
 interface MaterialInputProps {
     currentProject: Project;
@@ -22,7 +23,8 @@ interface MaterialInputProps {
 const aggregateByDiameter = (items: MaterialEntry[]) => {
     const map = new Map<string, { diameter: RebarDiameter, strength: string, planned: number, shop: number }>();
     
-    items.forEach(item => {
+    // 커플러는 개수(EA)라 ton 집계에 넣지 않는다 (CouplerSummaryTable에서 따로 집계)
+    items.filter(item => !isCoupler(item)).forEach(item => {
         const key = `${item.diameter}-${item.strength}`;
         if (!map.has(key)) {
             map.set(key, { diameter: item.diameter, strength: item.strength, planned: 0, shop: 0 });
@@ -407,7 +409,8 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             dia: ['철근직경', '직경', 'Dia', '규격'],
             strength: ['철근강종', '강종', 'Grade'],
             dong: ['동', 'Dong'],
-            standard: [] // Design doesn't use this
+            standard: [], // Design doesn't use this
+            component: ['구성']
         } : {
             // SHOP 물량: [동, 층, 도면명, 직경, 강종, 샵중량, 구분]
             floor: ['층', '층번호', 'Floor'],
@@ -416,10 +419,12 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             dia: ['직경', '철근직경', 'Dia', '규격'],
             strength: ['강종', '철근강종', 'Grade'],
             dong: ['동', 'Building', 'Dong'],
-            standard: ['구분', '기준', 'Classification', 'MemberType', 'Type']
+            standard: ['구분', '기준', 'Classification', 'MemberType', 'Type'],
+            component: ['구성']
         };
 
         const targetDongCounts: Record<string, number> = {};
+        let couplerRowCount = 0;
 
         // 기준 설정과 맞지 않는 행 (사유 -> 행 수). 하나라도 있으면 업로드 전체를 막는다.
         const rejected = new Map<string, number>();
@@ -521,6 +526,10 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
 
             const cleanDong = building.name;
             const cleanZone = String(zone);
+
+            // '구성' 칸에 커플러라고 적힌 행은 철근이 아니라 커플러이고, 값은 개수(EA)다
+            const isCouplerRow = /커플러|coupler/i.test(String(getValue(config.component) ?? ''));
+            const itemType = isCouplerRow ? 'Coupler' : 'Rebar';
             const cleanStrength = String(strengthVal);
             
             // --- Floor Adjustment Logic for Shop Horizontal Members ---
@@ -543,14 +552,18 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                 return;
             }
 
-            // Convert Input TON to KG
-            const weightKg = valueWeight * 1000;
+            // Convert Input TON to KG (커플러는 개수 그대로)
+            const weightKg = isCouplerRow ? 0 : valueWeight * 1000;
+            const count = isCouplerRow ? valueWeight : 0;
 
-            const uniqueKey = `${cleanDong}|${cleanFloor}|${cleanZone}|${diaEnum}|${cleanStrength}`;
+            const uniqueKey = `${cleanDong}|${cleanFloor}|${cleanZone}|${diaEnum}|${cleanStrength}|${itemType}`;
 
             if (aggregationMap.has(uniqueKey)) {
                 const existingEntry = aggregationMap.get(uniqueKey)!;
-                if (dataSource === 'Design') {
+                if (isCouplerRow) {
+                    if (dataSource === 'Design') existingEntry.plannedQuantity += count;
+                    else existingEntry.shopQuantity += count;
+                } else if (dataSource === 'Design') {
                     existingEntry.plannedWeight += weightKg;
                 } else {
                     existingEntry.shopWeight += weightKg;
@@ -573,9 +586,10 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                     strength: cleanStrength,
                     lengthMm: 0,
                     dataSource: dataSource,
-                    plannedQuantity: 0, 
+                    ...(isCouplerRow ? { itemType: 'Coupler' as const } : {}),
+                    plannedQuantity: dataSource === 'Design' ? count : 0,
                     plannedWeight: Number(pWeight.toFixed(2)),
-                    shopQuantity: 0,
+                    shopQuantity: dataSource === 'Shop' ? count : 0,
                     shopWeight: Number(sWeight.toFixed(2)),
                     plannedVersions: {},
                     lastUpdated: new Date().toLocaleDateString()
@@ -584,6 +598,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             }
 
             processedCount++;
+            if (isCouplerRow) couplerRowCount++;
             if (cleanDong === selectedDong) {
                 affectedFloors.add(cleanFloor);
             }
@@ -612,8 +627,9 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             
             const dongSummary = Object.entries(targetDongCounts).map(([d, c]) => `${d}: ${c}건`).join(', ');
             const logicInfo = dataSource === 'Shop' ? '\n(수평재 층 조정: Shop Floor - 1 적용됨)' : '';
-            const duplicateInfo = result.duplicatesRemoved > 0 ? `\n- 이전 업로드로 중복 저장된 물량 ${result.duplicatesRemoved}건 정리` : '';
-            alert(`[${dataSource} 모드] 처리 완료!${logicInfo}\n\n총 ${processedCount}행 유효 데이터 -> ${newEntries.length}개 항목으로 집계됨.\n(중량 단위: TON -> 내부 KG 변환 저장)\n\n[반영]\n- 신규 ${result.created}건\n- 기존 물량 덮어쓰기 ${result.replaced}건 (같은 동/층/Zone/직경/강종은 누적하지 않음)${duplicateInfo}\n\n[결과]\n${dongSummary}`);
+            const couplerInfo = couplerRowCount > 0 ? `\n(그중 커플러 ${couplerRowCount}행: '구성' 칸 기준, 개수(EA)로 따로 저장)` : '';
+            const duplicateInfo = result.duplicatesRemoved > 0? `\n- 이전 업로드로 중복 저장된 물량 ${result.duplicatesRemoved}건 정리` : '';
+            alert(`[${dataSource} 모드] 처리 완료!${logicInfo}\n\n총 ${processedCount}행 유효 데이터 -> ${newEntries.length}개 항목으로 집계됨.${couplerInfo}\n(중량 단위: TON -> 내부 KG 변환 저장)\n\n[반영]\n- 신규 ${result.created}건\n- 기존 물량 덮어쓰기 ${result.replaced}건 (같은 동/층/Zone/직경/강종은 누적하지 않음)${duplicateInfo}\n\n[결과]\n${dongSummary}`);
         } else {
             const requiredKeys = isDesignMode 
                 ? `필수 컬럼: ${config.zone[0]}, ${config.weight[0]}, ${config.floor[0]}, ${config.dia[0]}`
@@ -854,6 +870,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
 
                         {/* Diameter Summary */}
                         <DiameterSummaryTable data={aggregateByDiameter(dongMaterials)} title={`${selectedDong} 전체 직경별 집계`} />
+                        <CouplerSummaryTable items={dongMaterials} title={`${selectedDong} 커플러 직경별 집계`} />
 
                         {/* Floor Progress List */}
                         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
@@ -924,6 +941,8 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                             </div>
                         )}
 
+                        <div className="mb-6"><CouplerSummaryTable items={dongMaterials} title={`${selectedDong} 커플러 (실행 / SHOP 비교)`} /></div>
+
                         {canEdit && renderInputControls('design')}
 
                         {/* Detailed List */}
@@ -931,6 +950,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                             {displayFloorList.map(floor => {
                                 const fm = dongMaterials.filter(m => m.floor === floor && m.dataSource === 'Design');
                                 const totalWeight = fm.reduce((a,c)=>a+c.plannedWeight,0);
+                                const couplerEa = fm.filter(isCoupler).reduce((a,c)=>a+c.plannedQuantity,0);
                                 const isExpanded = expandedFloors.has(floor);
                                 
                                 return (
@@ -957,6 +977,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                                                      <span className={`text-sm font-bold ${totalWeight > 0 ? 'text-slate-800' : 'text-slate-300'}`}>
                                                         {(totalWeight/1000).toFixed(2)} t
                                                      </span>
+                                                     {couplerEa > 0 && <span className="block text-[11px] font-bold text-violet-600">커플러 {Math.round(couplerEa).toLocaleString()} EA</span>}
                                                 </div>
                                                 {isExpanded ? <ChevronUp size={20} className="text-slate-400"/> : <ChevronDown size={20} className="text-slate-400"/>}
                                             </div>
@@ -972,7 +993,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                                                                 <th className="px-4 py-2">Zone</th>
                                                                 <th className="px-4 py-2 text-center">DIA</th>
                                                                 <th className="px-4 py-2 text-center">GRADE</th>
-                                                                <th className="px-4 py-2 text-right">Weight (ton)</th>
+                                                                <th className="px-4 py-2 text-right">Weight (ton / 커플러 EA)</th>
                                                                 <th className="px-4 py-2 text-right">Updated</th>
                                                                 <th className="px-4 py-2 text-center">Action</th>
                                                             </tr>
@@ -980,10 +1001,10 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                                                         <tbody className="divide-y divide-slate-50">
                                                             {fm.map((item) => (
                                                                 <tr key={item.id} className="hover:bg-slate-50">
-                                                                    <td className="px-4 py-2 font-medium text-slate-700">{item.zone}</td>
+                                                                    <td className="px-4 py-2 font-medium text-slate-700">{item.zone}{isCoupler(item) && <span className="ml-2 px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 text-[10px] font-bold">커플러</span>}</td>
                                                                     <td className="px-4 py-2 text-center text-slate-600 font-mono">{item.diameter}</td>
                                                                     <td className="px-4 py-2 text-center text-slate-500 text-xs">{item.strength}</td>
-                                                                    <td className="px-4 py-2 text-right text-slate-800">{(item.plannedWeight / 1000).toLocaleString(undefined, {minimumFractionDigits: 3})}</td>
+                                                                    <td className={`px-4 py-2 text-right ${isCoupler(item) ? 'text-violet-700 font-bold' : 'text-slate-800'}`}>{formatEntryAmount(item)}</td>
                                                                     <td className="px-4 py-2 text-right text-slate-400">{item.lastUpdated}</td>
                                                                     <td className="px-4 py-2 text-center">
                                                                         {canEdit && (
@@ -1057,12 +1078,15 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                             </div>
                         )}
 
+                        <div className="mb-6"><CouplerSummaryTable items={dongMaterials} title={`${selectedDong} 커플러 (실행 / SHOP 비교)`} /></div>
+
                         {canEdit && renderInputControls('shop')}
 
                          <div className="space-y-4">
                             {displayFloorList.map(floor => {
                                 const fm = dongMaterials.filter(m => m.floor === floor && m.dataSource === 'Shop');
                                 const totalWeight = fm.reduce((a,c)=>a+c.shopWeight,0);
+                                const couplerEa = fm.filter(isCoupler).reduce((a,c)=>a+c.shopQuantity,0);
                                 const isExpanded = expandedFloors.has(floor);
 
                                 return (
@@ -1089,6 +1113,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                                                      <span className={`text-sm font-bold ${totalWeight > 0 ? 'text-blue-700' : 'text-slate-300'}`}>
                                                         {(totalWeight/1000).toFixed(2)} t
                                                      </span>
+                                                     {couplerEa > 0 && <span className="block text-[11px] font-bold text-violet-600">커플러 {Math.round(couplerEa).toLocaleString()} EA</span>}
                                                 </div>
                                                 {isExpanded ? <ChevronUp size={20} className="text-blue-400"/> : <ChevronDown size={20} className="text-blue-400"/>}
                                             </div>
@@ -1105,7 +1130,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                                                                 <th className="px-4 py-2">도면명 (Drawing/Zone)</th>
                                                                 <th className="px-4 py-2 text-center">DIA</th>
                                                                 <th className="px-4 py-2 text-center">GRADE</th>
-                                                                <th className="px-4 py-2 text-right">Shop Weight (ton)</th>
+                                                                <th className="px-4 py-2 text-right">Shop Weight (ton / 커플러 EA)</th>
                                                                 <th className="px-4 py-2 text-center">Action</th>
                                                             </tr>
                                                         </thead>
@@ -1113,10 +1138,10 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                                                             {fm.map((item) => (
                                                                 <tr key={item.id} className="hover:bg-blue-50/10">
                                                                     <td className="px-4 py-2 text-slate-500 font-mono">{item.lastUpdated}</td>
-                                                                    <td className="px-4 py-2 font-bold text-slate-700">{item.zone}</td>
+                                                                    <td className="px-4 py-2 font-bold text-slate-700">{item.zone}{isCoupler(item) && <span className="ml-2 px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 text-[10px] font-bold">커플러</span>}</td>
                                                                     <td className="px-4 py-2 text-center text-slate-600 font-mono">{item.diameter}</td>
                                                                     <td className="px-4 py-2 text-center text-slate-500 text-xs">{item.strength}</td>
-                                                                    <td className="px-4 py-2 text-right text-blue-700 font-bold">{(item.shopWeight / 1000).toLocaleString(undefined, {minimumFractionDigits: 3})}</td>
+                                                                    <td className={`px-4 py-2 text-right font-bold ${isCoupler(item) ? 'text-violet-700' : 'text-blue-700'}`}>{formatEntryAmount(item)}</td>
                                                                     <td className="px-4 py-2 text-center">
                                                                         {canEdit && (
                                                                             <button onClick={() => onDeleteMaterial(item.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={14}/></button>

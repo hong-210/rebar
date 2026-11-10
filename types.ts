@@ -92,6 +92,10 @@ export interface MaterialEntry {
     
     dataSource?: 'Design' | 'Shop'; // 'Design' = Planned/Original, 'Shop' = Actual/Fabrication
 
+    // 'Coupler'는 개수(EA)로 관리한다: 개수는 plannedQuantity/shopQuantity, 중량은 0.
+    // 값이 없으면 철근(ton)이다.
+    itemType?: 'Rebar' | 'Coupler';
+
     // Version Control for Planned Quantity
     // Map of Version Name -> Weight (e.g., { 'Rev.0': 1000, 'Rev.1': 1200 })
     plannedVersions: Record<string, number>;

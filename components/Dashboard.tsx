@@ -5,6 +5,7 @@ import { MaterialEntry, Project, RebarDiameter, User } from '../types';
 import { copyText } from '../utils/clipboard';
 import { TrendingUp, Package, Share2, AlertCircle, AlertTriangle, Trash2, ArrowRight, Building, CalendarClock, Timer, Layers, CircleDot, BarChart3, Key, Copy, X, Shield, Link as LinkIcon, Check, FileDown } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import { CouplerSummaryTable, isCoupler } from './CouplerSummary';
 
 interface DashboardProps {
     currentProject: Project;
@@ -22,6 +23,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ currentProject, user, mate
 
     // Filter materials for current project only
     const projectMaterials = materials.filter(m => m.projectId === currentProject.id);
+    // 커플러는 개수(EA)로 따로 집계하므로 ton 차트/보고서에는 철근만 쓴다
+    const rebarMaterials = projectMaterials.filter(m => !isCoupler(m));
+    const couplerMaterials = projectMaterials.filter(isCoupler);
 
     const userRole = currentProject.members.find(m => m.userId === user.email)?.role || 'Guest';
     const canEdit = userRole === 'Admin' || userRole === 'Participant';
@@ -72,7 +76,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ currentProject, user, mate
     // --- Prepare Chart Data ---
 
     // 1. By Floor
-    const floorDataMap = projectMaterials.reduce((acc, curr) => {
+    const floorDataMap = rebarMaterials.reduce((acc, curr) => {
         const key = curr.floor;
         if (!acc[key]) acc[key] = { name: key, planned: 0, shop: 0 };
         acc[key].planned += curr.plannedWeight;
@@ -95,7 +99,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ currentProject, user, mate
         });
 
     // 2. By Building (Dong)
-    const dongDataMap = projectMaterials.reduce((acc, curr) => {
+    const dongDataMap = rebarMaterials.reduce((acc, curr) => {
         const key = curr.dong;
         if (!acc[key]) acc[key] = { name: key, planned: 0, shop: 0 };
         acc[key].planned += curr.plannedWeight;
@@ -112,7 +116,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ currentProject, user, mate
         .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
 
     // 3. By Diameter
-    const diameterDataMap = projectMaterials.reduce((acc, curr) => {
+    const diameterDataMap = rebarMaterials.reduce((acc, curr) => {
         const key = curr.diameter;
         if (!acc[key]) acc[key] = { name: key, planned: 0, shop: 0 };
         acc[key].planned += curr.plannedWeight;
@@ -165,7 +169,7 @@ ${inviteText}`);
             shop: number
         }>();
 
-        projectMaterials.forEach(m => {
+        rebarMaterials.forEach(m => {
             const key = `${m.dong}|${m.floor}|${m.diameter}|${m.strength}`;
             if (!summaryMap.has(key)) {
                 summaryMap.set(key, { 
@@ -213,8 +217,8 @@ ${inviteText}`);
             }));
 
         // 2. Design Details (Filter dataSource === 'Design')
-        const designData = projectMaterials
-            .filter(m => m.dataSource === 'Design')
+        const designData = rebarMaterials
+.filter(m => m.dataSource === 'Design')
             .sort((a, b) => a.dong.localeCompare(b.dong) || getFloorVal(a.floor) - getFloorVal(b.floor))
             .map(m => ({
                 '동': m.dong,
@@ -227,8 +231,8 @@ ${inviteText}`);
             }));
 
         // 3. Shop Details (Filter dataSource === 'Shop')
-        const shopData = projectMaterials
-            .filter(m => m.dataSource === 'Shop')
+        const shopData = rebarMaterials
+.filter(m => m.dataSource === 'Shop')
             .sort((a, b) => a.dong.localeCompare(b.dong) || getFloorVal(a.floor) - getFloorVal(b.floor))
             .map(m => ({
                 '동': m.dong,
@@ -237,6 +241,19 @@ ${inviteText}`);
                 '직경': m.diameter,
                 '강종': m.strength,
                 '중량 (ton)': Number((m.shopWeight / 1000).toFixed(3)),
+                '업데이트': m.lastUpdated
+            }));
+
+        // 커플러 상세 (개수 기준)
+        const couplerData = couplerMaterials
+            .sort((a, b) => a.dong.localeCompare(b.dong) || getFloorVal(a.floor) - getFloorVal(b.floor))
+            .map(m => ({
+                '구분': m.dataSource === 'Shop' ? 'SHOP' : '실행',
+                '동': m.dong,
+                '층': m.floor,
+                'Zone / 도면명': m.zone,
+                '직경': m.diameter,
+                '수량 (EA)': m.dataSource === 'Shop' ? m.shopQuantity : m.plannedQuantity,
                 '업데이트': m.lastUpdated
             }));
 
@@ -257,6 +274,12 @@ ${inviteText}`);
         const wsShop = XLSX.utils.json_to_sheet(shopData);
         wsShop['!cols'] = [{wch: 15}, {wch: 10}, {wch: 20}, {wch: 10}, {wch: 10}, {wch: 15}, {wch: 15}];
         XLSX.utils.book_append_sheet(wb, wsShop, "SHOP 물량 상세");
+
+        if (couplerData.length > 0) {
+            const wsCoupler = XLSX.utils.json_to_sheet(couplerData);
+            wsCoupler['!cols'] = [{wch: 8}, {wch: 15}, {wch: 10}, {wch: 20}, {wch: 10}, {wch: 12}, {wch: 15}];
+            XLSX.utils.book_append_sheet(wb, wsCoupler, "커플러 상세 (EA)");
+        }
 
         // 5. Download
         const dateStr = new Date().toISOString().split('T')[0];
@@ -372,6 +395,8 @@ ${inviteText}`);
                     </div>
                 </div>
             )}
+
+            <CouplerSummaryTable items={couplerMaterials} title="프로젝트 전체 커플러 직경별 집계" />
 
             {projectMaterials.length > 0 ? (
                 <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">

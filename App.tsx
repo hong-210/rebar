@@ -329,7 +329,8 @@ export default function App() {
             m.zone === entryWithVersion.zone && 
             m.diameter === entryWithVersion.diameter &&
             m.strength === entryWithVersion.strength &&
-            m.dataSource === entryWithVersion.dataSource 
+            m.dataSource === entryWithVersion.dataSource &&
+            (m.itemType ?? 'Rebar') === (entryWithVersion.itemType ?? 'Rebar') // 수기 입력 철근이 커플러 행에 더해지지 않도록
         );
 
         if (existingIndex >= 0) {
@@ -362,7 +363,7 @@ export default function App() {
         if (entries.length === 0) return result;
 
         const keyOf = (m: MaterialEntry) =>
-            [m.projectId, m.dong, m.floor, m.zone, m.diameter, m.strength, m.dataSource ?? 'Design'].join('|');
+            [m.projectId, m.dong, m.floor, m.zone, m.diameter, m.strength, m.dataSource ?? 'Design', m.itemType ?? 'Rebar'].join('|');
 
         const existingByKey = new Map<string, MaterialEntry[]>();
         materials.forEach(m => {
