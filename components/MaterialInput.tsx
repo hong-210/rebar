@@ -351,16 +351,35 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
 
     const handleDownloadTemplate = () => {
         const isShop = activeTab === 'shop';
+        const dong = selectedDong || '101동';
         // Shop일 경우 '구분' 컬럼 추가 (수평재/수직재)
-        const headers = ['동', '층', isShop ? '도면명(Zone)' : 'Zone', '직경', '강종', isShop ? '샵중량(ton)' : '실행중량(ton)', isShop ? '구분(수평/수직)' : ''];
-        
-        const example = isShop 
-            ? [selectedDong || '101동', '4F', 'S1-Slab', '25', 'SD400', 0.5, '수평']
-            : [selectedDong || '101동', '4F', 'Slab', '25', 'SD400', 0.5, ''];
-        
-        const ws = XLSX.utils.aoa_to_sheet([headers, example]);
+        // '구성'이 커플러인 행은 값을 개수(EA)로 읽는다
+        const headers = ['동', '층', isShop ? '도면명(Zone)' : 'Zone', '직경', '강종', '구성(철근/커플러)', isShop ? '샵중량(ton) / 커플러(EA)' : '실행중량(ton) / 커플러(EA)', isShop ? '구분(수평/수직)' : ''];
+
+        const examples = isShop
+            ? [
+                [dong, '4F', 'S1-Slab', '25', 'SD400', '철근', 0.5, '수평'],
+                [dong, '4F', 'C1-Column', '25', 'SD400', '커플러', 120, '수직']
+            ]
+            : [
+                [dong, '4F', 'Slab', '25', 'SD400', '철근', 0.5, ''],
+                [dong, '4F', 'Column', '25', 'SD400', '커플러', 120, '']
+            ];
+
+        const ws = XLSX.utils.aoa_to_sheet([headers, ...examples]);
+        ws['!cols'] = [{wch: 10}, {wch: 6}, {wch: 14}, {wch: 6}, {wch: 8}, {wch: 18}, {wch: 26}, {wch: 16}];
+        const guide = XLSX.utils.aoa_to_sheet([
+            ['항목', '작성 방법'],
+            ['구성', "철근이면 '철근', 커플러면 '커플러'로 적습니다. 비워 두면 철근으로 봅니다."],
+            ['중량 / 개수', '철근은 중량(ton), 커플러는 개수(EA)를 같은 칸에 적습니다.'],
+            ['동 / 층', '프로젝트 설정에 있는 동 이름과 층 범위 안이어야 업로드됩니다. (예: 4F, B1)'],
+            ['직경', '커플러도 직경(예: 25)을 적어야 합니다. 직경이 없는 행은 건너뜁니다.'],
+            ...(isShop ? [['구분', "보·슬래브 등 수평재는 '수평'으로 적으면 한 층 아래로 집계됩니다."]] : [])
+        ]);
+        guide['!cols'] = [{wch: 14}, {wch: 70}];
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, "Input Template");
+        XLSX.utils.book_append_sheet(wb, guide, "작성 방법");
         XLSX.writeFile(wb, `물량입력양식_${isShop ? 'SHOP' : 'DESIGN'}.xlsx`);
     };
 
@@ -562,7 +581,8 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             const cleanZone = String(zone);
 
             // '구성' 칸에 커플러라고 적힌 행은 철근이 아니라 커플러이고, 값은 개수(EA)다
-            const isCouplerRow = /커플러|coupler/i.test(String(getValue(config.component) ?? ''));
+            // SHOP 업체가 커플러를 '구분' 칸에 적는 경우도 함께 본다
+            const isCouplerRow = /커플러|coupler/i.test(`${getValue(config.component) ?? ''} ${getValue(config.standard) ?? ''}`);
             const itemType = isCouplerRow ? 'Coupler' : 'Rebar';
             const cleanStrength = String(strengthVal);
             
