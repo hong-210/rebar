@@ -12,6 +12,7 @@ interface MaterialInputProps {
     onAddMaterial: (material: MaterialEntry) => void;
     onBatchAddMaterials: (materials: MaterialEntry[]) => void;
     onDeleteMaterial: (id: string) => void;
+    onDeleteAllMaterials: (projectId: string, dataSource: 'Design' | 'Shop', dong: string) => void;
     onCreateVersion: (projectId: string, versionName: string, versionDate: string, dong: string) => void;
     onSwitchVersion: (projectId: string, versionName: string, dong: string) => void;
     defaultTab?: 'overview' | 'design' | 'shop';
@@ -106,7 +107,7 @@ const DiameterSummaryTable: React.FC<{ data: ReturnType<typeof aggregateByDiamet
 
 export const MaterialInput: React.FC<MaterialInputProps> = ({ 
     currentProject, user, materials, 
-    onAddMaterial, onBatchAddMaterials, onDeleteMaterial,
+    onAddMaterial, onBatchAddMaterials, onDeleteMaterial, onDeleteAllMaterials,
     onCreateVersion, onSwitchVersion,
     defaultTab = 'overview'
 }) => {
@@ -205,6 +206,20 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
         const weight = entries.reduce((acc, m) => acc + m.shopWeight, 0);
         return { count: entries.length, weight };
     }, [dongMaterials]);
+
+    // 선택한 동의 실행 또는 SHOP 물량만 모두 지운다 (다른 동, 다른 구분은 그대로)
+    const handleDeleteAll = (dataSource: 'Design' | 'Shop') => {
+        const summary = dataSource === 'Design' ? designSummary : shopSummary;
+        const label = dataSource === 'Design' ? '실행 물량' : 'SHOP 물량';
+        if (summary.count === 0) {
+            alert(`${selectedDong}에 등록된 ${label}이 없습니다.`);
+            return;
+        }
+        const otherLabel = dataSource === 'Design' ? 'SHOP' : '실행';
+        const versionNote = dataSource === 'Design' ? '\n버전별(Rev) 물량 기록도 함께 삭제됩니다.' : '';
+        if (!confirm(`${selectedDong}의 ${label} ${summary.count.toLocaleString()}건을 모두 삭제합니다.\n다른 동과 ${otherLabel} 물량은 그대로 유지됩니다.${versionNote}\n\n삭제한 물량은 되돌릴 수 없습니다. 계속할까요?`)) return;
+        onDeleteAllMaterials(currentProject.id, dataSource, selectedDong);
+    };
 
     // Get Versions available for the Selected Dong
     const dongVersions = useMemo(() => {
@@ -852,6 +867,9 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                         {/* Actions */}
                         {canEdit && (
                             <div className="flex justify-end gap-2 mb-4">
+                                <button onClick={() => handleDeleteAll('Design')} className="flex items-center gap-2 bg-white border border-red-200 text-red-600 px-3 py-1.5 rounded-lg hover:bg-red-50 shadow-sm text-xs font-medium">
+                                    <Trash2 size={14} /> {selectedDong} 전체 삭제
+                                </button>
                                 <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept=".xlsx, .xls" className="hidden" />
                                 <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 bg-green-600 text-white px-3 py-1.5 rounded-lg hover:bg-green-700 shadow-sm text-xs font-medium">
                                     <FileSpreadsheet size={14} /> Excel Upload (Design)
@@ -979,6 +997,9 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                          {/* Actions */}
                         {canEdit && (
                             <div className="flex justify-end gap-2 mb-4">
+                                <button onClick={() => handleDeleteAll('Shop')} className="flex items-center gap-2 bg-white border border-red-200 text-red-600 px-3 py-1.5 rounded-lg hover:bg-red-50 shadow-sm text-xs font-medium">
+                                    <Trash2 size={14} /> {selectedDong} 전체 삭제
+                                </button>
                                 <button onClick={handleDownloadTemplate} className="flex items-center gap-2 bg-white border border-slate-300 text-slate-600 px-3 py-1.5 rounded-lg hover:bg-slate-50 shadow-sm text-xs font-medium">
                                     <Download size={14} /> 양식 다운로드
                                 </button>

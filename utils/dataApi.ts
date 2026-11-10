@@ -11,6 +11,7 @@ const snakeToCamel = (key: string) => key.replace(/_([a-z])/g, (_, c: string) =>
 
 const PAGE_SIZE = 1000; // PostgREST 기본 응답 한도
 const WRITE_CHUNK = 500;
+const DELETE_CHUNK = 200;
 
 interface TableOptions {
     newestFirst: boolean;
@@ -47,6 +48,11 @@ function createLocalTable<T extends { id: string }>(key: string, newestFirst: bo
 
         async remove(id: string): Promise<void> {
             writeLocal(key, load().filter(row => row.id !== id));
+        },
+
+        async removeMany(ids: string[]): Promise<void> {
+            const targets = new Set(ids);
+            writeLocal(key, load().filter(row => !targets.has(row.id)));
         }
     };
 }
@@ -102,6 +108,14 @@ function createTable<T extends { id: string }>(name: string, localKey: string, {
         async remove(id: string): Promise<void> {
             const { error } = await supabase.from(name).delete().eq('id', id);
             if (error) throw error;
+        },
+
+        async removeMany(ids: string[]): Promise<void> {
+            // id 목록이 URL에 실리므로 나눠서 보낸다
+            for (let i = 0; i < ids.length; i += DELETE_CHUNK) {
+                const { error } = await supabase.from(name).delete().in('id', ids.slice(i, i + DELETE_CHUNK));
+                if (error) throw error;
+            }
         }
     };
 }

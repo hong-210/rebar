@@ -384,6 +384,20 @@ export default function App() {
         }
     };
 
+    // 한 동의 실행 또는 SHOP 물량 전체 삭제 (다른 동, 다른 구분은 그대로)
+    const handleDeleteAllMaterials = (projectId: string, dataSource: 'Design' | 'Shop', dong: string) => {
+        // 구분이 없는 예전 데이터는 실행 물량으로 본다
+        const isTarget = (m: MaterialEntry) =>
+            m.projectId === projectId && m.dong === dong && (m.dataSource ?? 'Design') === dataSource;
+        const ids = materials.filter(isTarget).map(m => m.id);
+        if (ids.length === 0) return;
+
+        setMaterials(materials.filter(m => !isTarget(m)));
+        persist(materialsTable.removeMany(ids));
+        const label = dataSource === 'Design' ? '실행' : 'SHOP';
+        addLog(projectId, 'DELETE', `${dong} ${label} 철근 물량 전체 삭제 (${ids.length}건)`);
+    };
+
     // --- Concrete Logic ---
 
     const handleAddConcrete = (entry: ConcreteEntry) => {
@@ -708,6 +722,7 @@ export default function App() {
                                     onAddMaterial={handleAddMaterial}
                                     onBatchAddMaterials={handleBatchAddMaterials}
                                     onDeleteMaterial={handleDeleteMaterial}
+                                    onDeleteAllMaterials={handleDeleteAllMaterials}
                                     onCreateVersion={handleCreateVersion}
                                     onSwitchVersion={handleSwitchVersion}
                                     defaultTab="overview"
@@ -723,6 +738,7 @@ export default function App() {
                                     onAddMaterial={handleAddMaterial}
                                     onBatchAddMaterials={handleBatchAddMaterials}
                                     onDeleteMaterial={handleDeleteMaterial}
+                                    onDeleteAllMaterials={handleDeleteAllMaterials}
                                     onCreateVersion={handleCreateVersion}
                                     onSwitchVersion={handleSwitchVersion}
                                     defaultTab="design"
@@ -738,6 +754,7 @@ export default function App() {
                                     onAddMaterial={handleAddMaterial}
                                     onBatchAddMaterials={handleBatchAddMaterials}
                                     onDeleteMaterial={handleDeleteMaterial}
+                                    onDeleteAllMaterials={handleDeleteAllMaterials}
                                     onCreateVersion={handleCreateVersion}
                                     onSwitchVersion={handleSwitchVersion}
                                     defaultTab="shop"
