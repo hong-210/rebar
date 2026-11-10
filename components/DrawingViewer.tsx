@@ -27,7 +27,7 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({ drawing, user, can
     const [error, setError] = useState<string | null>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
 
-    // Load the PDF document from IndexedDB when the drawing changes
+    // Load the PDF document from storage when the drawing changes
     useEffect(() => {
         let cancelled = false;
         setLoading(true);
@@ -35,7 +35,7 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({ drawing, user, can
         setPageNum(1);
 
         (async () => {
-            const blob = await getPdfFile(drawing.id);
+            const blob = await getPdfFile(drawing.projectId, drawing.id);
             if (!blob) {
                 if (!cancelled) { setError('PDF 파일을 찾을 수 없습니다.'); setLoading(false); }
                 return;

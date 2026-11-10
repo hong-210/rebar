@@ -23,6 +23,7 @@ export const UNIT_WEIGHTS: Record<RebarDiameter, number> = {
 };
 
 export interface User {
+    id?: string; // Supabase auth user id
     email: string; // Used as ID
     name: string;
     role: 'admin' | 'viewer'; // System level role
@@ -31,6 +32,7 @@ export interface User {
 export type ProjectRole = 'Admin' | 'Participant' | 'Guest';
 
 export interface ProjectMember {
+    uid?: string; // Supabase auth user id
     userId: string; // User email
     userName: string;
     role: ProjectRole;

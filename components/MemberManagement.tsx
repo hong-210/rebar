@@ -1,6 +1,7 @@
 
 import React, { useState } from 'react';
 import { Project, User, ProjectRole } from '../types';
+import { copyText } from '../utils/clipboard';
 import { Users, Shield, UserCog, Share2, Search, Trash2, X } from 'lucide-react';
 
 interface MemberManagementProps {
@@ -37,9 +38,14 @@ export const MemberManagement: React.FC<MemberManagementProps> = ({ currentProje
         );
     }
 
-    const handleCopyInvite = () => {
+    const handleCopyInvite = async () => {
         const inviteText = `[RebarMaster Pro] 프로젝트 초대장\n\n📌 프로젝트: ${currentProject.name}\n🔑 초대 코드: ${currentProject.inviteCode || 'N/A'}\n\n🔗 접속 링크: ${window.location.origin}\n\n* 위 링크로 접속하여 초대 코드를 입력하면 '참여자' 권한으로 프로젝트에 참여할 수 있습니다.`;
-        navigator.clipboard.writeText(inviteText);
+        if (!(await copyText(inviteText))) {
+            alert(`복사하지 못했습니다. 아래 내용을 직접 복사하세요.
+
+${inviteText}`);
+            return;
+        }
         alert('초대장이 클립보드에 복사되었습니다!');
         setShowInviteModal(false);
     };

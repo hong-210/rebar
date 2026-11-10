@@ -9,11 +9,11 @@ interface ProjectListProps {
     user: User;
     onSelectProject: (project: Project) => void;
     onCreateProject: (project: Project) => void;
-    onJoinProject: (code: string) => boolean;
+    onJoinProject: (code: string) => Promise<boolean>;
     onSoftDeleteProject: (id: string) => void;
     onRestoreProject: (id: string) => void;
     onPermanentDeleteProject: (id: string) => void;
-    onLogout: () => void;
+    onLogout?: () => void; // 없으면 로그아웃 버튼을 숨긴다 (로컬 모드)
 }
 
 export const ProjectList: React.FC<ProjectListProps> = ({ 
@@ -67,10 +67,10 @@ export const ProjectList: React.FC<ProjectListProps> = ({
         }
     };
 
-    const handleJoin = (e: React.FormEvent) => {
+    const handleJoin = async (e: React.FormEvent) => {
         e.preventDefault();
         if (joinCode) {
-            const success = onJoinProject(joinCode.toUpperCase());
+            const success = await onJoinProject(joinCode.toUpperCase());
             if (success) {
                 setIsJoining(false);
                 setJoinCode('');
@@ -162,12 +162,14 @@ export const ProjectList: React.FC<ProjectListProps> = ({
                             <Shield size={12} className={isSystemAdmin ? 'text-blue-600' : 'text-slate-400'} />
                             System Role: {isSystemAdmin ? 'Administrator' : 'User'}
                         </div>
-                        <button 
-                            onClick={onLogout}
-                            className="flex items-center gap-2 text-slate-500 hover:text-red-600 transition-colors px-4 py-2 rounded-lg hover:bg-slate-200 text-sm font-medium"
-                        >
-                            <LogOut size={18} /> 로그아웃
-                        </button>
+                        {onLogout && (
+                            <button
+                                onClick={onLogout}
+                                className="flex items-center gap-2 text-slate-500 hover:text-red-600 transition-colors px-4 py-2 rounded-lg hover:bg-slate-200 text-sm font-medium"
+                            >
+                                <LogOut size={18} /> 로그아웃
+                            </button>
+                        )}
                     </div>
                 </div>
 

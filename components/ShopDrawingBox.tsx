@@ -94,7 +94,7 @@ export const ShopDrawingBox: React.FC<ShopDrawingBoxProps> = ({
                 const buf = await file.arrayBuffer();
                 const doc = await pdfjsLib.getDocument({ data: buf }).promise;
                 const id = `${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
-                await savePdfFile(id, file);
+                await savePdfFile(currentProject.id, id, file);
 
                 const newDrawing: ShopDrawing = {
                     id,
@@ -126,7 +126,7 @@ export const ShopDrawingBox: React.FC<ShopDrawingBoxProps> = ({
     };
 
     const handleDownload = async (drawing: ShopDrawing) => {
-        const blob = await getPdfFile(drawing.id);
+        const blob = await getPdfFile(drawing.projectId, drawing.id);
         if (!blob) { alert('저장된 파일을 찾을 수 없습니다.'); return; }
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -138,7 +138,7 @@ export const ShopDrawingBox: React.FC<ShopDrawingBoxProps> = ({
 
     const handleDelete = async (drawing: ShopDrawing) => {
         if (!window.confirm(`'${drawing.title}' 도면을 삭제하시겠습니까? 등록된 검측 항목이 모두 삭제됩니다.`)) return;
-        await deletePdfFile(drawing.id);
+        await deletePdfFile(drawing.projectId, drawing.id);
         onDeleteDrawing(drawing.id);
     };
 

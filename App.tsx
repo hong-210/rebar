@@ -1,14 +1,19 @@
 
-import React from 'react'; // eslint-disable-line @typescript-eslint/no-unused-vars
+import React, { useState, useEffect, useCallback } from 'react'; // eslint-disable-line @typescript-eslint/no-unused-vars
 import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { useLocalStorage } from './hooks/useLocalStorage';
+import { supabase, isSupabaseConfigured } from './utils/supabase';
+import { isLocalMode, LOCAL_ADMIN } from './utils/localMode';
+import { newId } from './utils/id';
+import * as projectApi from './utils/projectApi';
+import { materialsTable, concretesTable, logsTable, issuesTable, ordersTable, inspectionsTable, drawingsTable } from './utils/dataApi';
 import { Sidebar } from './components/Sidebar';
 import { Dashboard } from './components/Dashboard';
 import { ProjectSettings } from './components/ProjectSettings';
 import { MaterialInput } from './components/MaterialInput';
 import { ConcreteInput } from './components/ConcreteInput';
 import { HistoryLogViewer } from './components/HistoryLog';
-import { Login, UserAccount } from './components/Login';
+import { Login } from './components/Login';
 import { ProjectList } from './components/ProjectList';
 import { IssueTracker } from './components/IssueTracker';
 import { InspectionTracker } from './components/InspectionTracker';
@@ -18,55 +23,116 @@ import { MemberManagement } from './components/MemberManagement';
 import { ThreeDViewer } from './components/ThreeDViewer';
 import { Project, MaterialEntry, ConcreteEntry, HistoryLog, User, Issue, IssueStatus, Order, OrderStatus, ProjectRole, Inspection, InspectionResult, ShopDrawing } from './types';
 
-// Default Admin Account
-const INITIAL_USERS: UserAccount[] = [
-    { id: 'admin', email: 'admin', password: '000000', name: '관리자(Admin)', role: 'admin' }
-];
+const errorMessage = (err: unknown) =>
+    err && typeof err === 'object' && 'message' in err ? String((err as { message: unknown }).message) : String(err);
+
+const FullScreenMessage: React.FC<{ title: string; children?: React.ReactNode }> = ({ title, children }) => (
+    <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-8 text-center space-y-4">
+            <h1 className="text-lg font-bold text-slate-800">{title}</h1>
+            {children}
+        </div>
+    </div>
+);
 
 
 export default function App() {
-    // Auth State (localStorage 영구 저장)
-    const [currentUser, setCurrentUser] = useLocalStorage<User | null>('rbm_v2_currentUser', null);
-    const [registeredUsers, setRegisteredUsers] = useLocalStorage<UserAccount[]>('rbm_v2_users', INITIAL_USERS);
+    // Auth State (Supabase 세션)
+    const [authUserId, setAuthUserId] = useState<string | null>(null);
+    const [authReady, setAuthReady] = useState(false);
+    const [currentUser, setCurrentUser] = useState<User | null>(null);
+    const [loadError, setLoadError] = useState<string | null>(null);
 
-    // Data State (localStorage 영구 저장)
-    const [projects, setProjects] = useLocalStorage<Project[]>('rbm_v2_projects', []);
+    // Data State (Supabase DB에 저장, 로그인 시 불러온다)
+    const [projects, setProjects] = useState<Project[]>([]);
+    const [materials, setMaterials] = useState<MaterialEntry[]>([]);
+    const [concretes, setConcretes] = useState<ConcreteEntry[]>([]);
+    const [logs, setLogs] = useState<HistoryLog[]>([]);
+    const [issues, setIssues] = useState<Issue[]>([]);
+    const [orders, setOrders] = useState<Order[]>([]);
+    const [inspections, setInspections] = useState<Inspection[]>([]);
+    const [drawings, setDrawings] = useState<ShopDrawing[]>([]);
+
+    // 마지막으로 연 프로젝트만 브라우저에 기억한다
     const [currentProjectId, setCurrentProjectId] = useLocalStorage<string | null>('rbm_v2_currentProjectId', null);
-    const [materials, setMaterials] = useLocalStorage<MaterialEntry[]>('rbm_v2_materials', []);
-    const [concretes, setConcretes] = useLocalStorage<ConcreteEntry[]>('rbm_v2_concretes', []);
-    const [logs, setLogs] = useLocalStorage<HistoryLog[]>('rbm_v2_logs', []);
-    const [issues, setIssues] = useLocalStorage<Issue[]>('rbm_v2_issues', []);
-    const [orders, setOrders] = useLocalStorage<Order[]>('rbm_v2_orders', []);
-    const [inspections, setInspections] = useLocalStorage<Inspection[]>('rbm_v2_inspections', []);
-    const [drawings, setDrawings] = useLocalStorage<ShopDrawing[]>('rbm_v2_drawings', []);
 
     // currentProject는 projects 배열에서 파생 (항상 최신 상태 반영)
-    const currentProject = projects.find(p => p.id === currentProjectId) ?? null;
+    // 휴지통에 있는 프로젝트는 열 수 없다 (다른 멤버가 삭제한 경우 포함)
+    const currentProject = projects.find(p => p.id === currentProjectId && !p.isDeleted) ?? null;
 
-    const handleLogin = (user: User) => {
-        setCurrentUser(user);
-    };
-
-    const handleRegister = (newUser: UserAccount, inviteCode?: string) => {
-        setRegisteredUsers([...registeredUsers, newUser]);
-        
-        // Auto login
-        const userSession: User = {
-            email: newUser.email,
-            name: newUser.name,
-            role: newUser.role
-        };
-        setCurrentUser(userSession);
-
-        // Handle Invite Code Joining
-        if (inviteCode) {
-            handleJoinProject(inviteCode, userSession);
+    // 세션 변화 구독. 콜백 안에서 supabase를 다시 호출하면 교착될 수 있어 id만 저장하고,
+    // 실제 데이터 로딩은 아래 effect에서 한다.
+    // 로컬 모드는 로그인 없이 관리자 계정으로 바로 들어간다.
+    useEffect(() => {
+        if (isLocalMode) {
+            setAuthUserId(LOCAL_ADMIN.id!);
+            setAuthReady(true);
+            return;
         }
+        const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+            setAuthUserId(session?.user.id ?? null);
+            setAuthReady(true);
+        });
+        return () => data.subscription.unsubscribe();
+    }, []);
+
+    const loadUserData = useCallback(async (userId: string) => {
+        const [
+            profile, projectList, materialList, concreteList, logList, issueList, orderList, inspectionList, drawingList
+        ] = await Promise.all([
+            projectApi.fetchProfile(userId),
+            projectApi.fetchProjects(),
+            materialsTable.fetchAll(),
+            concretesTable.fetchAll(),
+            logsTable.fetchAll(),
+            issuesTable.fetchAll(),
+            ordersTable.fetchAll(),
+            inspectionsTable.fetchAll(),
+            drawingsTable.fetchAll()
+        ]);
+        setProjects(projectList);
+        setMaterials(materialList);
+        setConcretes(concreteList);
+        setLogs(logList);
+        setIssues(issueList);
+        setOrders(orderList);
+        setInspections(inspectionList);
+        setDrawings(drawingList);
+        setCurrentUser(profile);
+    }, []);
+
+    useEffect(() => {
+        setLoadError(null);
+        if (!authUserId) {
+            setCurrentUser(null);
+            setProjects([]);
+            setMaterials([]);
+            setConcretes([]);
+            setLogs([]);
+            setIssues([]);
+            setOrders([]);
+            setInspections([]);
+            setDrawings([]);
+            return;
+        }
+        let cancelled = false;
+        loadUserData(authUserId).catch(err => {
+            if (!cancelled) setLoadError(errorMessage(err));
+        });
+        return () => { cancelled = true; };
+    }, [authUserId, loadUserData]);
+
+    // 화면은 먼저 바꾸고(낙관적 갱신) DB에 저장한다. 실패하면 알리고 DB 기준으로 되돌린다.
+    const persist = (save: Promise<void>) => {
+        save.catch(err => {
+            alert(`저장에 실패했습니다.\n${errorMessage(err)}`);
+            if (authUserId) loadUserData(authUserId).catch(() => {});
+        });
     };
 
     const handleLogout = () => {
-        setCurrentUser(null);
         setCurrentProjectId(null);
+        supabase.auth.signOut();
     };
 
     const handleSelectProject = (project: Project) => {
@@ -74,56 +140,39 @@ export default function App() {
     };
 
     // Allow joining existing projects via code
-    const handleJoinProject = (code: string, userToJoin: User = currentUser!) => {
-        const project = projects.find(p => p.inviteCode === code);
-        if (project) {
-            // Check if already a member
-            const isMember = project.members.some(m => m.userId === userToJoin.email);
-            if (!isMember) {
-                const updatedProject = {
-                    ...project,
-                    members: [
-                        ...project.members,
-                        {
-                            userId: userToJoin.email,
-                            userName: userToJoin.name,
-                            role: 'Participant' as ProjectRole, // Default role
-                            joinedAt: new Date().toISOString()
-                        }
-                    ]
-                };
-                setProjects(prev => prev.map(p => p.id === project.id ? updatedProject : p));
-                if (!currentProjectId) setCurrentProjectId(updatedProject.id);
+    const handleJoinProject = async (code: string) => {
+        try {
+            const result = await projectApi.joinProject(code);
+            if (!result) return false;
 
-                alert(`'${project.name}' 프로젝트에 '참여자(Participant)' 권한으로 입장했습니다.`);
-            } else {
-                if (!currentProjectId) setCurrentProjectId(project.id);
-                alert(`이미 '${project.name}' 프로젝트의 멤버입니다.`);
-            }
+            const { project, alreadyMember } = result;
+            setProjects(prev => prev.some(p => p.id === project.id)
+                ? prev.map(p => p.id === project.id ? project : p)
+                : [...prev, project]);
+            setCurrentProjectId(project.id);
+
+            alert(alreadyMember
+                ? `이미 '${project.name}' 프로젝트의 멤버입니다.`
+                : `'${project.name}' 프로젝트에 '참여자(Participant)' 권한으로 입장했습니다.`);
             return true;
+        } catch (err) {
+            alert(`프로젝트 입장에 실패했습니다.\n${errorMessage(err)}`);
+            return true; // 코드 오류 안내가 중복으로 뜨지 않도록
         }
-        return false;
     };
 
     const handleExitProject = () => {
         setCurrentProjectId(null);
     };
 
-    const handleCreateProject = (newProject: Project) => {
-        // Generate a random 6-character invite code
-        newProject.inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-        newProject.activeVersion = {}; 
-        newProject.isDeleted = false;
-        // Assign Creator as Admin
-        if (currentUser) {
-            newProject.members = [{
-                userId: currentUser.email,
-                userName: currentUser.name,
-                role: 'Admin',
-                joinedAt: new Date().toISOString()
-            }];
+    // 초대 코드 발급과 생성자 Admin 등록은 DB(create_project)에서 처리한다.
+    const handleCreateProject = async (newProject: Project) => {
+        try {
+            const created = await projectApi.createProject(newProject);
+            setProjects(prev => [...prev, created]);
+        } catch (err) {
+            alert(`프로젝트 생성에 실패했습니다.\n${errorMessage(err)}`);
         }
-        setProjects([...projects, newProject]);
     };
 
     // --- Soft Delete, Restore, Permanent Delete Logic ---
@@ -132,21 +181,25 @@ export default function App() {
     const handleMoveToTrash = (id: string) => {
         setProjects(prev => prev.map(p => p.id === id ? { ...p, isDeleted: true } : p));
         if (currentProjectId === id) setCurrentProjectId(null);
+        persist(projectApi.setProjectDeleted(id, true));
     };
 
     // Restore from Trash
     const handleRestoreProject = (id: string) => {
         setProjects(prev => prev.map(p => p.id === id ? { ...p, isDeleted: false } : p));
+        persist(projectApi.setProjectDeleted(id, false));
     };
 
     // Permanent Delete
     const handlePermanentDeleteProject = (id: string) => {
         setProjects(prev => prev.filter(p => p.id !== id));
+        persist(projectApi.deleteProject(id));
         // Note: Ideally, clean up materials/issues/logs here too, but for now we remove the project entry.
     };
 
     const handleUpdateProject = (updatedProject: Project) => {
         setProjects(projects.map(p => p.id === updatedProject.id ? updatedProject : p));
+        persist(projectApi.updateProject(updatedProject));
         addLog(updatedProject.id, 'UPDATE', `프로젝트 정보 수정: ${updatedProject.name}`);
     };
 
@@ -154,25 +207,30 @@ export default function App() {
         const project = projects.find(p => p.id === projectId);
         if (!project) return;
 
-        const updatedMembers = project.members.map(m => 
+        const member = project.members.find(m => m.userId === userId);
+        if (!member?.uid) return;
+
+        const updatedMembers = project.members.map(m =>
             m.userId === userId ? { ...m, role: newRole } : m
         );
-        
+
         const updatedProject = { ...project, members: updatedMembers };
         setProjects(prev => prev.map(p => p.id === projectId ? updatedProject : p));
+        persist(projectApi.updateMemberRole(projectId, member.uid, newRole));
         addLog(projectId, 'UPDATE', `멤버 권한 변경 (${userId} -> ${newRole})`);
     };
 
     const handleRemoveMember = (projectId: string, userId: string) => {
         const project = projects.find(p => p.id === projectId);
         if (!project) return;
-        
+
         const member = project.members.find(m => m.userId === userId);
-        if (!member) return;
+        if (!member?.uid) return;
 
         const updatedMembers = project.members.filter(m => m.userId !== userId);
         const updatedProject = { ...project, members: updatedMembers };
         setProjects(prev => prev.map(p => p.id === projectId ? updatedProject : p));
+        persist(projectApi.removeMember(projectId, member.uid));
         addLog(projectId, 'UPDATE', `멤버 삭제: ${member.userName} (${userId})`);
     };
 
@@ -194,21 +252,26 @@ export default function App() {
         };
 
         setProjects(projects.map(p => p.id === projectId ? updatedProject : p));
+        persist(projectApi.updateProject(updatedProject));
 
         // 2. Snapshot Materials
+        const changed: MaterialEntry[] = [];
         const updatedMaterials = materials.map(m => {
             if (m.projectId === projectId && m.dong === dong && m.dataSource !== 'Shop') {
-                return {
+                const updated = {
                     ...m,
                     plannedVersions: {
                         ...m.plannedVersions,
-                        [versionName]: m.plannedWeight 
+                        [versionName]: m.plannedWeight
                     }
                 };
+                changed.push(updated);
+                return updated;
             }
             return m;
         });
         setMaterials(updatedMaterials);
+        persist(materialsTable.upsert(changed));
 
         addLog(projectId, 'VERSION', `새 버전 생성 (${dong}): ${versionName} (${versionDate})`);
     };
@@ -226,19 +289,24 @@ export default function App() {
             }
         };
         setProjects(projects.map(p => p.id === projectId ? updatedProject : p));
+        persist(projectApi.updateProject(updatedProject));
 
         // 2. Restore Material Weights
+        const changed: MaterialEntry[] = [];
         const updatedMaterials = materials.map(m => {
             if (m.projectId === projectId && m.dong === dong && m.dataSource !== 'Shop') {
                 const historicWeight = m.plannedVersions[versionName] || 0;
-                return {
+                const updated = {
                     ...m,
                     plannedWeight: historicWeight
                 };
+                changed.push(updated);
+                return updated;
             }
             return m;
         });
         setMaterials(updatedMaterials);
+        persist(materialsTable.upsert(changed));
     };
 
     // --- Material Logic (Rebar) ---
@@ -269,6 +337,7 @@ export default function App() {
              const existing = updatedMaterials[existingIndex];
              updatedMaterials[existingIndex] = {
                  ...entryWithVersion,
+                 id: existing.id, // 기존 행을 수정하는 것이므로 id는 유지해야 DB에 중복 행이 생기지 않는다
                  plannedVersions: { ...existing.plannedVersions, ...entryWithVersion.plannedVersions },
                  plannedQuantity: existing.plannedQuantity + entryWithVersion.plannedQuantity,
                  plannedWeight: existing.plannedWeight + entryWithVersion.plannedWeight,
@@ -276,9 +345,11 @@ export default function App() {
                  shopWeight: existing.shopWeight + entryWithVersion.shopWeight,
              };
              setMaterials(updatedMaterials);
+             persist(materialsTable.upsert([updatedMaterials[existingIndex]]));
              addLog(entry.projectId, 'UPDATE', `${entry.dong} ${entry.floor} ${entry.zone} [${entry.dataSource}] 철근 물량 업데이트`);
         } else {
             setMaterials([...materials, entryWithVersion]);
+            persist(materialsTable.upsert([entryWithVersion]));
             addLog(entry.projectId, 'CREATE', `${entry.dong} ${entry.floor} ${entry.zone} [${entry.dataSource}] 철근 물량 추가`);
         }
     };
@@ -299,6 +370,7 @@ export default function App() {
         });
 
         setMaterials(newMaterials);
+        persist(materialsTable.insert(entries));
         const dongList = Array.from(affectedDongs).join(', ');
         addLog(entries[0].projectId, 'IMPORT', `철근 엑셀 데이터 일괄 업로드 (${entries.length}건) - ${dongList}`);
     };
@@ -307,6 +379,7 @@ export default function App() {
         const target = materials.find(m => m.id === id);
         if (target) {
             setMaterials(materials.filter(m => m.id !== id));
+            persist(materialsTable.remove(id));
             addLog(target.projectId, 'DELETE', `${target.dong} ${target.floor} ${target.zone} 철근 물량 삭제`);
         }
     };
@@ -326,18 +399,24 @@ export default function App() {
 
         if (existingIndex >= 0) {
             const updated = [...concretes];
-            updated[existingIndex].plannedVolume += entry.plannedVolume;
-            updated[existingIndex].constructionVolume += entry.constructionVolume;
+            updated[existingIndex] = {
+                ...updated[existingIndex],
+                plannedVolume: updated[existingIndex].plannedVolume + entry.plannedVolume,
+                constructionVolume: updated[existingIndex].constructionVolume + entry.constructionVolume
+            };
             setConcretes(updated);
+            persist(concretesTable.upsert([updated[existingIndex]]));
             addLog(entry.projectId, 'UPDATE', `${entry.dong} ${entry.floor} 콘크리트 업데이트`);
         } else {
             setConcretes([...concretes, entry]);
+            persist(concretesTable.upsert([entry]));
             addLog(entry.projectId, 'CREATE', `${entry.dong} ${entry.floor} 콘크리트 추가`);
         }
     };
 
     const handleBatchAddConcrete = (entries: ConcreteEntry[]) => {
         const newConcretes = [...concretes];
+        const touched = new Map<string, ConcreteEntry>(); // DB에 반영할 행 (신규 + 병합된 기존 행)
         let updatedCount = 0;
         let createdCount = 0;
 
@@ -360,71 +439,94 @@ export default function App() {
                     constructionVolume: newConcretes[existingIndex].constructionVolume + entry.constructionVolume,
                     lastUpdated: new Date().toLocaleDateString()
                 };
+                touched.set(newConcretes[existingIndex].id, newConcretes[existingIndex]);
                 updatedCount++;
             } else {
                 newConcretes.push(entry);
+                touched.set(entry.id, entry);
                 createdCount++;
             }
         });
 
         setConcretes(newConcretes);
+        persist(concretesTable.upsert([...touched.values()]));
         addLog(entries[0].projectId, 'IMPORT', `콘크리트 일괄 업로드 (신규: ${createdCount}, 병합: ${updatedCount})`);
     };
 
     const handleDeleteConcrete = (id: string) => {
         setConcretes(concretes.filter(c => c.id !== id));
+        persist(concretesTable.remove(id));
     };
 
     // Issue Handlers
     const handleAddIssue = (issue: Issue) => {
         setIssues([issue, ...issues]);
+        persist(issuesTable.upsert([issue]));
         addLog(issue.projectId, 'CREATE', `이슈 등록: ${issue.title}`);
     };
 
+    // 일부 필드만 바꿔 화면과 DB에 반영하고, 바뀐 이슈를 돌려준다 (없으면 undefined)
+    const patchIssue = (id: string, patch: Partial<Issue>) => {
+        const issue = issues.find(i => i.id === id);
+        if (!issue) return undefined;
+        const updated = { ...issue, ...patch };
+        setIssues(issues.map(i => i.id === id ? updated : i));
+        persist(issuesTable.upsert([updated]));
+        return updated;
+    };
+
     const handleUpdateIssueStatus = (id: string, status: IssueStatus) => {
-        setIssues(issues.map(i => i.id === id ? { ...i, status } : i));
+        patchIssue(id, { status });
     };
 
     const handleDeleteIssue = (id: string) => {
-        setIssues(issues.map(i => i.id === id ? { ...i, isDeleted: true } : i));
-        const issue = issues.find(i => i.id === id);
+        const issue = patchIssue(id, { isDeleted: true });
         if (issue) addLog(issue.projectId, 'DELETE', `이슈 삭제 (휴지통 이동): ${issue.title}`);
     };
 
     const handleRestoreIssue = (id: string) => {
-        setIssues(issues.map(i => i.id === id ? { ...i, isDeleted: false } : i));
-        const issue = issues.find(i => i.id === id);
+        const issue = patchIssue(id, { isDeleted: false });
         if (issue) addLog(issue.projectId, 'UPDATE', `이슈 복구: ${issue.title}`);
     };
 
     const handlePermanentDeleteIssue = (id: string) => {
         setIssues(issues.filter(i => i.id !== id));
+        persist(issuesTable.remove(id));
     };
 
     // Inspection Handlers
     const handleAddInspection = (inspection: Inspection) => {
         setInspections([inspection, ...inspections]);
+        persist(inspectionsTable.upsert([inspection]));
         addLog(inspection.projectId, 'CREATE', `검측 등록: ${inspection.dong} ${inspection.floor} ${inspection.zone}`);
     };
 
+    const patchInspection = (id: string, patch: Partial<Inspection>) => {
+        const inspection = inspections.find(i => i.id === id);
+        if (!inspection) return undefined;
+        const updated = { ...inspection, ...patch };
+        setInspections(inspections.map(i => i.id === id ? updated : i));
+        persist(inspectionsTable.upsert([updated]));
+        return updated;
+    };
+
     const handleUpdateInspectionResult = (id: string, result: InspectionResult) => {
-        setInspections(inspections.map(i => i.id === id ? { ...i, result } : i));
+        patchInspection(id, { result });
     };
 
     const handleDeleteInspection = (id: string) => {
-        setInspections(inspections.map(i => i.id === id ? { ...i, isDeleted: true } : i));
-        const inspection = inspections.find(i => i.id === id);
+        const inspection = patchInspection(id, { isDeleted: true });
         if (inspection) addLog(inspection.projectId, 'DELETE', `검측 삭제 (휴지통 이동): ${inspection.dong} ${inspection.floor} ${inspection.zone}`);
     };
 
     const handleRestoreInspection = (id: string) => {
-        setInspections(inspections.map(i => i.id === id ? { ...i, isDeleted: false } : i));
-        const inspection = inspections.find(i => i.id === id);
+        const inspection = patchInspection(id, { isDeleted: false });
         if (inspection) addLog(inspection.projectId, 'UPDATE', `검측 복구: ${inspection.dong} ${inspection.floor} ${inspection.zone}`);
     };
 
     const handlePermanentDeleteInspection = (id: string) => {
         setInspections(inspections.filter(i => i.id !== id));
+        persist(inspectionsTable.remove(id));
     };
 
     // Shop Drawing Handlers
@@ -433,34 +535,41 @@ export default function App() {
     // a closure over the outer `drawings` would drop all but the last call.
     const handleAddDrawing = (drawing: ShopDrawing) => {
         setDrawings(prev => [drawing, ...prev]);
+        persist(drawingsTable.upsert([drawing]));
         addLog(drawing.projectId, 'CREATE', `샵도면 업로드: ${drawing.title}`);
     };
 
     const handleUpdateDrawing = (updated: ShopDrawing) => {
         setDrawings(prev => prev.map(d => d.id === updated.id ? updated : d));
+        persist(drawingsTable.upsert([updated]));
     };
 
     const handleDeleteDrawing = (id: string) => {
         const drawing = drawings.find(d => d.id === id);
         setDrawings(prev => prev.filter(d => d.id !== id));
+        persist(drawingsTable.remove(id));
         if (drawing) addLog(drawing.projectId, 'DELETE', `샵도면 삭제: ${drawing.title}`);
     };
 
     // Order Handlers
     const handleAddOrder = (order: Order) => {
         setOrders([order, ...orders]);
+        persist(ordersTable.upsert([order]));
         addLog(order.projectId, 'CREATE', `철근 발주 등록: ${order.title}`);
     };
 
     const handleUpdateOrder = (updatedOrder: Order) => {
         setOrders(orders.map(o => o.id === updatedOrder.id ? updatedOrder : o));
+        persist(ordersTable.upsert([updatedOrder]));
         addLog(updatedOrder.projectId, 'UPDATE', `발주 내역 수정: ${updatedOrder.title}`);
     };
 
     const handleUpdateOrderStatus = (id: string, status: OrderStatus) => {
         const order = orders.find(o => o.id === id);
         if (order) {
-            setOrders(orders.map(o => o.id === id ? { ...o, status } : o));
+            const updated = { ...order, status };
+            setOrders(orders.map(o => o.id === id ? updated : o));
+            persist(ordersTable.upsert([updated]));
             addLog(order.projectId, 'UPDATE', `발주 상태 변경 (${order.title}): ${status}`);
         }
     };
@@ -469,6 +578,7 @@ export default function App() {
         const order = orders.find(o => o.id === id);
         if (order) {
             setOrders(orders.filter(o => o.id !== id));
+            persist(ordersTable.remove(id));
             addLog(order.projectId, 'DELETE', `발주 내역 삭제: ${order.title}`);
         }
     };
@@ -476,7 +586,8 @@ export default function App() {
     const addLog = (projectId: string, action: HistoryLog['action'], description: string) => {
         if (!currentUser) return;
         const newLog: HistoryLog = {
-            id: Date.now().toString(),
+            // 일괄 업로드처럼 같은 밀리초에 여러 건이 기록될 수 있어 시간 기반 id는 쓰지 않는다
+            id: newId(),
             projectId,
             action,
             description,
@@ -484,10 +595,56 @@ export default function App() {
             timestamp: new Date().toISOString()
         };
         setLogs(prev => [newLog, ...prev]);
+        // 이력 저장 실패는 본 작업을 막거나 되돌리지 않는다
+        logsTable.insert([newLog]).catch(err => console.error('변경 이력 저장 실패', err));
     };
 
+    if (!isLocalMode && !isSupabaseConfigured) {
+        return (
+            <FullScreenMessage title="Supabase 설정이 필요합니다">
+                <p className="text-sm text-slate-500 leading-relaxed">
+                    <code>.env.local</code> 파일에 <code>VITE_SUPABASE_URL</code>과 <code>VITE_SUPABASE_ANON_KEY</code>를
+                    입력한 뒤 개발 서버를 다시 시작하세요.
+                </p>
+            </FullScreenMessage>
+        );
+    }
+
+    if (!authReady) {
+        return <FullScreenMessage title="불러오는 중..." />;
+    }
+
+    if (!authUserId) {
+        return <Login />;
+    }
+
+    if (loadError) {
+        return (
+            <FullScreenMessage title="데이터를 불러오지 못했습니다">
+                <p className="text-sm text-slate-500 break-words">{loadError}</p>
+                <div className="flex gap-3 justify-center">
+                    <button
+                        onClick={() => {
+                            setLoadError(null);
+                            loadUserData(authUserId).catch(err => setLoadError(errorMessage(err)));
+                        }}
+                        className="bg-blue-600 text-white font-bold px-5 py-2.5 rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                    >
+                        다시 시도
+                    </button>
+                    {!isLocalMode && <button
+                        onClick={handleLogout}
+                        className="bg-slate-100 text-slate-600 font-bold px-5 py-2.5 rounded-lg hover:bg-slate-200 transition-colors text-sm"
+                    >
+                        로그아웃
+                    </button>}
+                </div>
+            </FullScreenMessage>
+        );
+    }
+
     if (!currentUser) {
-        return <Login onLogin={handleLogin} registeredUsers={registeredUsers} onRegister={handleRegister} />;
+        return <FullScreenMessage title="불러오는 중..." />;
     }
 
     if (!currentProject) {
@@ -502,7 +659,7 @@ export default function App() {
                 onSoftDeleteProject={handleMoveToTrash}
                 onRestoreProject={handleRestoreProject}
                 onPermanentDeleteProject={handlePermanentDeleteProject}
-                onLogout={handleLogout}
+                onLogout={isLocalMode ? undefined : handleLogout}
             />
         );
     }

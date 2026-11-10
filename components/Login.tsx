@@ -1,87 +1,64 @@
 
 import React, { useState } from 'react';
-import { Mail, Lock, ArrowRight, CheckCircle, ShieldCheck, User as UserIcon, Key } from 'lucide-react';
-import { User } from '../types';
+import { Lock, ArrowRight, CheckCircle, Mail, Key } from 'lucide-react';
+import { supabase } from '../utils/supabase';
 
-export interface UserAccount extends User {
-    id?: string;
-    password?: string;
-}
-
-interface LoginProps {
-    onLogin: (user: User) => void;
-    onRegister: (user: UserAccount, inviteCode?: string) => void;
-    registeredUsers: UserAccount[];
-}
-
-export const Login: React.FC<LoginProps> = ({ onLogin, onRegister, registeredUsers }) => {
+// 로그인/가입에 성공하면 App이 Supabase 세션 변화를 감지해 화면을 전환한다.
+export const Login: React.FC = () => {
     const [mode, setMode] = useState<'login' | 'signup'>('login');
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [name, setName] = useState('');
     const [inviteCode, setInviteCode] = useState('');
-    
-    // Signup Verification
+    const [isSubmitting, setIsSubmitting] = useState(false);
+
+    // 'verify' = 인증 메일 발송 후 안내 화면
     const [signUpStep, setSignUpStep] = useState<'details' | 'verify'>('details');
-    const [verificationCode, setVerificationCode] = useState('');
-    const [generatedCode, setGeneratedCode] = useState<string | null>(null);
 
-    const handleLoginSubmit = (e: React.FormEvent) => {
+    const handleLoginSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        
-        // Find user by Email or ID (since admin uses 'admin' as ID)
-        const foundUser = registeredUsers.find(
-            u => (u.email === email || u.id === email) && u.password === password
-        );
+        setIsSubmitting(true);
+        const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+        setIsSubmitting(false);
 
-        if (foundUser) {
-            onLogin({
-                email: foundUser.email,
-                name: foundUser.name,
-                role: foundUser.role
-            });
-        } else {
-            alert('아이디 또는 비밀번호가 올바르지 않습니다.');
+        if (error) {
+            alert(error.code === 'email_not_confirmed'
+                ? '이메일 인증이 완료되지 않았습니다. 받은 메일의 인증 링크를 먼저 눌러주세요.'
+                : '이메일 또는 비밀번호가 올바르지 않습니다.');
         }
     };
 
-    const handleSendVerification = (e: React.FormEvent) => {
+    const handleSignUp = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!email || !password || !name) {
             alert('모든 필드를 입력해주세요.');
             return;
         }
-        
-        // Check if email already exists
-        if (registeredUsers.find(u => u.email === email)) {
+
+        setIsSubmitting(true);
+        // 프로필 생성과 초대 코드 입장은 DB 트리거(handle_new_user)가 처리한다.
+        const { data, error } = await supabase.auth.signUp({
+            email: email.trim(),
+            password,
+            options: {
+                data: { name: name.trim(), invite_code: inviteCode.trim() },
+                emailRedirectTo: window.location.origin
+            }
+        });
+        setIsSubmitting(false);
+
+        if (error) {
+            alert(`회원가입에 실패했습니다.\n${error.message}`);
+            return;
+        }
+        // 이미 가입된 이메일이면 Supabase는 오류 대신 identities가 빈 사용자를 돌려준다.
+        if (data.user && data.user.identities?.length === 0) {
             alert('이미 등록된 이메일입니다.');
             return;
         }
-
-        const newCode = Math.floor(100000 + Math.random() * 900000).toString();
-        setGeneratedCode(newCode);
-        setSignUpStep('verify');
-        
-        setTimeout(() => {
-            alert(`[인증 코드 발송]\n인증코드: ${newCode}\n(메일 발송 시뮬레이션)`);
-        }, 500);
-    };
-
-    const handleCompleteSignUp = (e: React.FormEvent) => {
-        e.preventDefault();
-        if (verificationCode === generatedCode || verificationCode === '000000') {
-            const newUser: UserAccount = {
-                id: email, // Use email as ID for normal users
-                email: email,
-                name: name,
-                password: password,
-                role: 'viewer'
-            };
-            
-            alert('회원가입이 완료되었습니다.');
-            onRegister(newUser, inviteCode);
-        } else {
-            alert('인증 코드가 일치하지 않습니다.');
+        // 이메일 인증이 꺼져 있으면 세션이 바로 생겨 자동 로그인되고, 켜져 있으면 안내 화면을 보여준다.
+        if (!data.session) {
+            setSignUpStep('verify');
         }
     };
 
@@ -91,7 +68,6 @@ export const Login: React.FC<LoginProps> = ({ onLogin, onRegister, registeredUse
         setEmail('');
         setPassword('');
         setName('');
-        setVerificationCode('');
         setInviteCode('');
     };
 
@@ -122,16 +98,16 @@ export const Login: React.FC<LoginProps> = ({ onLogin, onRegister, registeredUse
                     {mode === 'login' && (
                         <form onSubmit={handleLoginSubmit} className="space-y-6">
                             <div>
-                                <label className="block text-sm font-medium text-slate-700 mb-2">아이디 또는 이메일</label>
+                                <label className="block text-sm font-medium text-slate-700 mb-2">이메일</label>
                                 <div className="relative">
-                                    <UserIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400" size={20} />
-                                    <input 
-                                        type="text" 
+                                    <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400" size={20} />
+                                    <input
+                                        type="email"
                                         required
                                         value={email}
                                         onChange={(e) => setEmail(e.target.value)}
                                         className="w-full pl-10 pr-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        placeholder="admin or user@company.com"
+                                        placeholder="user@company.com"
                                     />
                                 </div>
                             </div>
@@ -149,17 +125,18 @@ export const Login: React.FC<LoginProps> = ({ onLogin, onRegister, registeredUse
                                     />
                                 </div>
                             </div>
-                            <button 
+                            <button
                                 type="submit"
-                                className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 transition-colors shadow-lg shadow-blue-200"
+                                disabled={isSubmitting}
+                                className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 transition-colors shadow-lg shadow-blue-200 disabled:opacity-60"
                             >
-                                로그인
+                                {isSubmitting ? '로그인 중...' : '로그인'}
                             </button>
                         </form>
                     )}
 
                     {mode === 'signup' && signUpStep === 'details' && (
-                        <form onSubmit={handleSendVerification} className="space-y-4">
+                        <form onSubmit={handleSignUp} className="space-y-4">
                             <div>
                                 <label className="block text-xs font-bold text-slate-500 mb-1">이름 (Name)</label>
                                 <input 
@@ -185,12 +162,13 @@ export const Login: React.FC<LoginProps> = ({ onLogin, onRegister, registeredUse
                             <div>
                                 <label className="block text-xs font-bold text-slate-500 mb-1">비밀번호 (Password)</label>
                                 <input 
-                                    type="password" 
+                                    type="password"
                                     required
+                                    minLength={6}
                                     value={password}
                                     onChange={(e) => setPassword(e.target.value)}
                                     className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                    placeholder="••••••"
+                                    placeholder="6자 이상"
                                 />
                             </div>
                             <div>
@@ -207,50 +185,33 @@ export const Login: React.FC<LoginProps> = ({ onLogin, onRegister, registeredUse
                                     />
                                 </div>
                             </div>
-                            <button 
+                            <button
                                 type="submit"
-                                className="w-full bg-slate-800 text-white font-bold py-3 rounded-xl hover:bg-slate-700 transition-colors flex items-center justify-center gap-2 mt-4"
+                                disabled={isSubmitting}
+                                className="w-full bg-slate-800 text-white font-bold py-3 rounded-xl hover:bg-slate-700 transition-colors flex items-center justify-center gap-2 mt-4 disabled:opacity-60"
                             >
-                                이메일 인증코드 발송 <ArrowRight size={18} />
+                                {isSubmitting ? '가입 처리 중...' : <>회원가입 <ArrowRight size={18} /></>}
                             </button>
                         </form>
                     )}
 
                     {mode === 'signup' && signUpStep === 'verify' && (
-                        <form onSubmit={handleCompleteSignUp} className="space-y-6">
+                        <div className="space-y-6 text-center">
+                            <CheckCircle className="mx-auto text-green-600" size={40} />
                             <div>
-                                <button 
-                                    type="button" 
-                                    onClick={() => setSignUpStep('details')}
-                                    className="text-sm text-slate-500 mb-4 hover:text-blue-600 block"
-                                >
-                                    ← 정보 수정하기
-                                </button>
-                                <h2 className="text-xl font-bold text-slate-800 mb-2">인증번호 확인</h2>
-                                <p className="text-sm text-slate-500 mb-6">
-                                    <span className="font-bold">{email}</span> 로 발송된 6자리 코드를 입력해주세요.
+                                <h2 className="text-xl font-bold text-slate-800 mb-2">인증 메일을 보냈습니다</h2>
+                                <p className="text-sm text-slate-500 leading-relaxed">
+                                    <span className="font-bold">{email}</span> 로 발송된 메일의 인증 링크를 누르면 가입이 완료됩니다.
                                 </p>
-                                <label className="block text-sm font-medium text-slate-700 mb-2">인증 코드</label>
-                                <div className="relative">
-                                    <ShieldCheck className="absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400" size={20} />
-                                    <input 
-                                        type="text" 
-                                        required
-                                        value={verificationCode}
-                                        onChange={(e) => setVerificationCode(e.target.value)}
-                                        className="w-full pl-10 pr-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 tracking-widest text-lg"
-                                        placeholder="000000"
-                                        maxLength={6}
-                                    />
-                                </div>
                             </div>
-                            <button 
-                                type="submit"
-                                className="w-full bg-green-600 text-white font-bold py-3 rounded-xl hover:bg-green-700 transition-colors flex items-center justify-center gap-2"
+                            <button
+                                type="button"
+                                onClick={() => switchMode('login')}
+                                className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 transition-colors"
                             >
-                                가입 및 로그인 완료 <CheckCircle size={20} />
+                                로그인 화면으로
                             </button>
-                        </form>
+                        </div>
                     )}
                 </div>
             </div>

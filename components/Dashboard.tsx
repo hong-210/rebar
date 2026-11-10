@@ -2,6 +2,7 @@
 import React, { useState } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { MaterialEntry, Project, RebarDiameter } from '../types';
+import { copyText } from '../utils/clipboard';
 import { TrendingUp, Package, Share2, AlertCircle, ArrowRight, Building, CalendarClock, Timer, Layers, CircleDot, BarChart3, Key, Copy, X, Shield, Link as LinkIcon, Check, FileDown } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
@@ -113,9 +114,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ currentProject, materials 
                            : chartView === 'floor' ? floorData 
                            : diameterData;
 
-    const handleCopyInvite = () => {
+    const handleCopyInvite = async () => {
         const inviteText = `[RebarMaster Pro] 프로젝트 초대장\n\n📌 프로젝트: ${currentProject.name}\n🔑 초대 코드: ${currentProject.inviteCode || 'N/A'}\n\n🔗 접속 링크: ${window.location.origin}\n\n* 위 링크로 접속하여 초대 코드를 입력하면 '참여자' 권한으로 프로젝트에 참여할 수 있습니다.`;
-        navigator.clipboard.writeText(inviteText);
+        if (!(await copyText(inviteText))) {
+            alert(`복사하지 못했습니다. 아래 내용을 직접 복사하세요.
+
+${inviteText}`);
+            return;
+        }
         alert('초대장이 클립보드에 복사되었습니다! 팀원에게 전달하세요.');
         setShowInviteModal(false);
     };
