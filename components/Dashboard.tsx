@@ -1,25 +1,48 @@
 
 import React, { useState } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
-import { MaterialEntry, Project, RebarDiameter } from '../types';
+import { MaterialEntry, Project, RebarDiameter, User } from '../types';
 import { copyText } from '../utils/clipboard';
-import { TrendingUp, Package, Share2, AlertCircle, ArrowRight, Building, CalendarClock, Timer, Layers, CircleDot, BarChart3, Key, Copy, X, Shield, Link as LinkIcon, Check, FileDown } from 'lucide-react';
+import { TrendingUp, Package, Share2, AlertCircle, AlertTriangle, Trash2, ArrowRight, Building, CalendarClock, Timer, Layers, CircleDot, BarChart3, Key, Copy, X, Shield, Link as LinkIcon, Check, FileDown } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
 interface DashboardProps {
     currentProject: Project;
+    user: User;
     materials: MaterialEntry[];
+    onDeleteMaterialsOfDong: (projectId: string, dong: string) => void;
 }
 
 const COLORS_PLANNED = '#94a3b8'; // Slate 400
 const COLORS_SHOP = '#3b82f6';    // Blue 500
 
-export const Dashboard: React.FC<DashboardProps> = ({ currentProject, materials }) => {
+export const Dashboard: React.FC<DashboardProps> = ({ currentProject, user, materials, onDeleteMaterialsOfDong }) => {
     const [chartView, setChartView] = useState<'building' | 'floor' | 'diameter'>('building');
     const [showInviteModal, setShowInviteModal] = useState(false);
 
     // Filter materials for current project only
     const projectMaterials = materials.filter(m => m.projectId === currentProject.id);
+
+    const userRole = currentProject.members.find(m => m.userId === user.email)?.role || 'Guest';
+    const canEdit = userRole === 'Admin' || userRole === 'Participant';
+
+    // 프로젝트 기준 설정에 없는 동으로 저장된 물량 (예: 예전 업로드에서 '201동' 대신 '201'로 들어간 경우).
+    // 물량 화면에는 탭이 없어 보이지도 지워지지도 않으므로 여기서 알려주고 지울 수 있게 한다.
+    const buildingNames = new Set(currentProject.buildings.map(b => b.name));
+    const orphanDongs = Object.values(projectMaterials
+        .filter(m => !buildingNames.has(m.dong))
+        .reduce((acc, m) => {
+            const entry = acc[m.dong] ?? (acc[m.dong] = { dong: m.dong, count: 0, planned: 0, shop: 0 });
+            entry.count++;
+            entry.planned += m.plannedWeight;
+            entry.shop += m.shopWeight;
+            return acc;
+        }, {} as Record<string, { dong: string, count: number, planned: number, shop: number }>));
+
+    const handleDeleteOrphan = (dong: string, count: number) => {
+        if (!confirm(`기준 설정에 없는 동 '${dong || '(빈칸)'}'의 물량 ${count.toLocaleString()}건(실행 + SHOP)을 모두 삭제합니다.\n프로젝트 설정에 있는 동의 물량은 그대로 유지됩니다.\n\n삭제한 물량은 되돌릴 수 없습니다. 계속할까요?`)) return;
+        onDeleteMaterialsOfDong(currentProject.id, dong);
+    };
 
     // Calculate totals
     const totalPlannedWeight = projectMaterials.reduce((acc, curr) => acc + curr.plannedWeight, 0);
@@ -319,6 +342,37 @@ ${inviteText}`);
             </div>
 
             {/* Combined Charts Area */}
+            {orphanDongs.length > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-5">
+                    <h3 className="font-bold text-amber-800 flex items-center gap-2 mb-1">
+                        <AlertTriangle size={18} /> 프로젝트 설정에 없는 동의 물량이 있습니다
+                    </h3>
+                    <p className="text-sm text-amber-700 mb-4">
+                        아래 물량은 동 이름이 프로젝트 설정과 달라 물량 화면에서 보이지 않지만, 전체 합계와 차트에는 포함됩니다.
+                    </p>
+                    <div className="space-y-2">
+                        {orphanDongs.map(o => (
+                            <div key={o.dong} className="flex flex-wrap items-center justify-between gap-3 bg-white border border-amber-100 rounded-lg px-4 py-3">
+                                <div className="text-sm">
+                                    <span className="font-bold text-slate-800">'{o.dong || '(빈칸)'}'</span>
+                                    <span className="text-slate-500 ml-3">{o.count.toLocaleString()}건</span>
+                                    <span className="text-slate-500 ml-3">실행 {(o.planned / 1000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ton</span>
+                                    <span className="text-blue-600 ml-3">SHOP {(o.shop / 1000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ton</span>
+                                </div>
+                                {canEdit && (
+                                    <button
+                                        onClick={() => handleDeleteOrphan(o.dong, o.count)}
+                                        className="flex items-center gap-2 bg-white border border-red-200 text-red-600 px-3 py-1.5 rounded-lg hover:bg-red-50 shadow-sm text-xs font-medium"
+                                    >
+                                        <Trash2 size={14} /> 삭제
+                                    </button>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
             {projectMaterials.length > 0 ? (
                 <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
                     <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4">

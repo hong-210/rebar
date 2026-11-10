@@ -439,6 +439,17 @@ export default function App() {
         addLog(projectId, 'DELETE', `${dong} ${label} 철근 물량 전체 삭제 (${ids.length}건)`);
     };
 
+    // 한 동의 실행 + SHOP 물량을 모두 지운다 (기준 설정에 없는 동으로 잘못 들어간 물량 정리용)
+    const handleDeleteMaterialsOfDong = (projectId: string, dong: string) => {
+        const isTarget = (m: MaterialEntry) => m.projectId === projectId && m.dong === dong;
+        const ids = materials.filter(isTarget).map(m => m.id);
+        if (ids.length === 0) return;
+
+        setMaterials(materials.filter(m => !isTarget(m)));
+        persist(materialsTable.removeMany(ids));
+        addLog(projectId, 'DELETE', `설정에 없는 동 '${dong}' 철근 물량 삭제 (${ids.length}건)`);
+    };
+
     // --- Concrete Logic ---
 
     const handleAddConcrete = (entry: ConcreteEntry) => {
@@ -730,7 +741,7 @@ export default function App() {
                 
                 <main className="flex-1 ml-64 p-8 overflow-x-hidden">
                     <Routes>
-                        <Route path="/" element={<Dashboard currentProject={currentProject} materials={materials} />} />
+                        <Route path="/" element={<Dashboard currentProject={currentProject} user={currentUser} materials={materials} onDeleteMaterialsOfDong={handleDeleteMaterialsOfDong} />} />
                         <Route 
                             path="/projects" 
                             element={
