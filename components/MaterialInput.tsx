@@ -16,6 +16,7 @@ interface PendingUpload {
     affectedFloors: string[];
     processedCount: number;
     couplerRowCount: number;
+    shiftedRowCount: number; // 실행 수평재 중 한 층 위로 옮긴 행 수
     existingCount: number; // 파일에 든 동들의 같은 구분 기존 물량 건수
 }
 
@@ -355,7 +356,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
         const dong = selectedDong || '101동';
         // Shop일 경우 '구분' 컬럼 추가 (수평재/수직재)
         // '구성'이 커플러인 행은 값을 개수(EA)로 읽는다
-        const headers = ['동', '층', isShop ? '도면명(Zone)' : 'Zone', '직경', '강종', '구성(철근/커플러)', isShop ? '샵중량(ton) / 커플러(EA)' : '실행중량(ton) / 커플러(EA)', isShop ? '구분(수평/수직)' : ''];
+        const headers = ['동', '층', isShop ? '도면명(Zone)' : 'Zone', '직경', '강종', '구성(철근/커플러)', isShop ? '샵중량(ton) / 커플러(EA)' : '실행중량(ton) / 커플러(EA)', '구분(수평/수직)'];
 
         const examples = isShop
             ? [
@@ -363,8 +364,8 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                 [dong, '4F', 'C1-Column', '25', 'SD400', '커플러', 120, '수직']
             ]
             : [
-                [dong, '4F', 'Slab', '25', 'SD400', '철근', 0.5, ''],
-                [dong, '4F', 'Column', '25', 'SD400', '커플러', 120, '']
+                [dong, '4F', 'Slab', '25', 'SD400', '철근', 0.5, '수평'],
+                [dong, '4F', 'Column', '25', 'SD400', '커플러', 120, '수직']
             ];
 
         const ws = XLSX.utils.aoa_to_sheet([headers, ...examples]);
@@ -373,11 +374,13 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             ['항목', '작성 방법'],
             ['구성', "철근이면 '철근', 커플러면 '커플러'로 적습니다. 비워 두면 철근으로 봅니다."],
             ['중량 / 개수', '철근은 중량(ton), 커플러는 개수(EA)를 같은 칸에 적습니다.'],
-            ['동 / 층', '프로젝트 설정에 있는 동 이름과 층 범위 안이어야 업로드됩니다. (예: 4F, B1)'],
+            ['동 / 층', "프로젝트 설정에 있는 동 이름과 층 범위 안이어야 업로드됩니다. (예: 4F, B1) 'PIT'는 최하층(지하층수), 'RF'·'지붕'은 지상층수+1층으로 반영됩니다."],
             ['직경', '커플러도 직경(예: 25)을 적어야 합니다. 직경이 없는 행은 건너뜁니다.'],
             ['내진(S)', "직경에 S를 붙이거나(D22S) 강종에 붙이면(SD600S) 모두 'D22 / SD600S'로 같게 반영됩니다. 강종 숫자 없이 S만 적거나(강종 'S') 직경에만 S가 있으면(22S) '미기재(S)'로 반영됩니다."],
             ['강종', "적으면 철근·커플러 모두 그대로 반영됩니다. 비워 두면 '미기재'로 표시됩니다."],
-            ...(isShop ? [['구분', "보·슬래브 등 수평재는 '수평'으로 적으면 한 층 아래로 집계됩니다."]] : [])
+            ['구분', isShop
+                ? "SHOP 물량은 적힌 층 그대로 집계됩니다. (슬래브는 그 층 바닥 기준)"
+                : "슬래브·보·기초 등은 '수평', 기둥·벽체·계단 등은 '수직'으로 적습니다. 실행의 수평재는 천장 기준이라 한 층 위로 올려 SHOP과 같은 기준으로 집계됩니다. (B3F 수평 → B2F, 최하층·기초는 그대로)"]
         ]);
         guide['!cols'] = [{wch: 14}, {wch: 70}];
         const wb = XLSX.utils.book_new();
@@ -386,24 +389,21 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
         XLSX.writeFile(wb, `물량입력양식_${isShop ? 'SHOP' : 'DESIGN'}.xlsx`);
     };
 
-    // Helper: Shift floor down by one level for Horizontal members in Shop
-    const getShiftedFloor = (floor: string): string => {
-        const f = floor.toUpperCase().trim();
-        // Handle Basement (B1 -> B2)
-        if (f.startsWith('B')) {
-            const num = parseInt(f.replace(/[^0-9]/g, ''));
-            if (!isNaN(num)) return `B${num + 1}`;
-        } 
-        // Handle Ground (1F -> B1, 2F -> 1F)
-        else if (f.endsWith('F')) {
-            const num = parseInt(f.replace(/[^0-9]/g, ''));
-            if (!isNaN(num)) {
-                if (num === 1) return 'B1';
-                return `${num - 1}F`;
-            }
-        }
-        return floor; // Return original if unknown format
+    // 실행(n형)은 바닥판을 아래층 천장으로, SHOP(u형)은 위층 바닥으로 본다.
+    // 실행 수평재를 한 층 위로 올려 SHOP 기준에 맞춘다 (B3 -> B2, B1 -> 1F, 4F -> 5F)
+    const getFloorAbove = (floor: string): string => {
+        const basement = floor.match(/^B(\d+)$/);
+        if (basement) return Number(basement[1]) === 1 ? '1F' : `B${Number(basement[1]) - 1}`;
+        const ground = floor.match(/^(\d+)F$/);
+        if (ground) return `${Number(ground[1]) + 1}F`;
+        return floor;
     };
+
+    // 슬래브·보·기초 등 수평재인지 (기둥·벽체·계단 등 수직재는 그대로 둔다)
+    const isHorizontalMember = (text: string) =>
+        !/수직|vertical/i.test(text) &&
+        /수평|horizontal|슬래브|slab|beam|girder|거더|기초|footing|매트|deck|데크|(?:^|[^가-힣])(?:큰|작은)?보(?![가-힣])/i.test(text);
+    const isFoundationMember = (text: string) => /기초|footing|매트|mat(?![a-z])/i.test(text);
 
     // 읽어 둔 엑셀 물량을 반영한다. replace면 파일에 든 동들의 같은 구분 기존 물량을 비우고 새로 채운다.
     const applyUpload = (upload: PendingUpload, replace: boolean) => {
@@ -417,7 +417,11 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
 
         const label = upload.dataSource === 'Design' ? '실행' : 'SHOP';
         const dongSummary = Object.entries(upload.dongRowCounts).map(([d, c]) => `${d}: ${c}건`).join(', ');
-        const logicInfo = upload.dataSource === 'Shop' ? '\n(수평재 층 조정: Shop Floor - 1 적용됨)' : '';
+        const logicInfo = upload.dataSource === 'Design'
+            ? (upload.shiftedRowCount > 0
+                ? `\n(수평재 ${upload.shiftedRowCount}행: 실행 n형 → SHOP 기준으로 한 층 위로 반영, 최하층·기초는 그대로)`
+                : "\n(주의: 수평재로 인식된 행이 없어 층 변환을 하지 않았습니다. '구분' 칸에 수평/슬래브/보/기초 등이 적혀 있는지 확인하세요.)")
+            : '';
         const couplerInfo = upload.couplerRowCount > 0 ? `\n(그중 커플러 ${upload.couplerRowCount}행: '구성' 칸 기준, 개수(EA)로 따로 저장)` : '';
         const applied = replace
             ? `- 교체: 기존 ${label} 물량 ${result.cleared}건 삭제 후 ${result.created}건 새로 반영`
@@ -433,12 +437,12 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             ?? currentProject.buildings.find(b => normalize(b.name) === normalize(rawDong));
     };
 
-    // 기준 설정의 층 범위(B{지하층수}~B1, 1F~{지상층수}F) 안에 있는지
+    // 기준 설정의 층 범위(B{지하층수}~B1, 1F~{지상층수}F, 지붕 {지상층수+1}F) 안에 있는지
     const isFloorInBuilding = (building: BuildingConfig, floor: string) => {
         const basement = floor.match(/^B(\d+)$/);
         if (basement) return Number(basement[1]) >= 1 && Number(basement[1]) <= building.basementFloors;
         const ground = floor.match(/^(\d+)F$/);
-        if (ground) return Number(ground[1]) >= 1 && Number(ground[1]) <= building.groundFloors;
+        if (ground) return Number(ground[1]) >= 1 && Number(ground[1]) <= building.groundFloors + 1;
         return false; // PH, R 등 기준 설정에 없는 층
     };
 
@@ -465,7 +469,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             dia: ['철근직경', '직경', 'Dia', '규격'],
             strength: ['철근강종', '강종', 'Grade'],
             dong: ['동', 'Dong'],
-            standard: [], // Design doesn't use this
+            standard: ['구분', '부재', '부재명', 'MemberType'],
             component: ['구성']
         } : {
             // SHOP 물량: [동, 층, 도면명, 직경, 강종, 샵중량, 구분]
@@ -481,6 +485,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
 
         const targetDongCounts: Record<string, number> = {};
         let couplerRowCount = 0;
+        let shiftedRowCount = 0;
 
         // 기준 설정과 맞지 않는 행 (사유 -> 행 수). 하나라도 있으면 업로드 전체를 막는다.
         const rejected = new Map<string, number>();
@@ -516,8 +521,11 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                 const fStr = String(floorRaw).trim().toUpperCase();
                 const numVal = parseInt(fStr);
                 
+                // PIT는 최하층, RF/지붕은 최상층 위 (동을 찾은 뒤 실제 층으로 바꾼다)
+                if (/PIT|피트/.test(fStr)) floor = 'PIT';
+                else if (/^(RF|ROOF|R|지붕|지붕층)$/.test(fStr)) floor = 'RF';
                 // Pure Number Case: -1 => B1, 1 => 1F
-                if (!isNaN(numVal) && String(numVal) === fStr) {
+                else if (!isNaN(numVal) && String(numVal) === fStr) {
                     if (numVal < 0) floor = `B${Math.abs(numVal)}`;
                     else if (numVal > 0) floor = `${numVal}F`;
                     else floor = '1F'; // 0 -> 1F fallback
@@ -531,7 +539,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                         } else {
                             floor = `${numbers}F`;
                         }
-                    } else if (fStr === 'PH' || fStr === 'R') {
+                    } else if (fStr === 'PH') {
                          floor = fStr; 
                     }
                 }
@@ -579,23 +587,24 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             const cleanDong = building.name;
             const cleanZone = String(zone);
 
-            // --- Floor Adjustment Logic for Shop Horizontal Members ---
+            // PIT는 최하층(B{지하층수}), RF는 지상층수 + 1층으로 본다
             let cleanFloor = String(floor);
-            
-            if (dataSource === 'Shop') {
-                const standardVal = getValue(config.standard) || '';
-                const stdStr = String(standardVal).toLowerCase();
-                const isHorizontal = stdStr.includes('수평') || stdStr.includes('horizontal') || stdStr.includes('slab') || stdStr.includes('beam') || stdStr.includes('보') || stdStr.includes('슬래브');
-                
-                if (isHorizontal) {
-                    cleanFloor = getShiftedFloor(cleanFloor);
+            const lowestFloor = building.basementFloors > 0 ? `B${building.basementFloors}` : '1F';
+            if (cleanFloor === 'PIT') cleanFloor = lowestFloor;
+            else if (cleanFloor === 'RF') cleanFloor = `${building.groundFloors + 1}F`;
+
+            // SHOP 층은 그대로 두고, 실행 수평재만 한 층 위로 올린다 (최하층·기초는 그대로)
+            if (dataSource === 'Design') {
+                const memberText = `${getValue(config.standard) ?? ''} ${zone}`;
+                if (isHorizontalMember(memberText) && !isFoundationMember(memberText) && cleanFloor !== lowestFloor) {
+                    cleanFloor = getFloorAbove(cleanFloor);
+                    shiftedRowCount++;
                 }
             }
-            // ----------------------------------------------------------
 
             if (!isFloorInBuilding(building, cleanFloor)) {
-                const shiftNote = cleanFloor !== floor ? ` (엑셀 ${floor} 수평재 → 한 층 아래 ${cleanFloor})` : '';
-                rejectRow(`${cleanDong} ${cleanFloor}${shiftNote}: 기준 설정 범위(지하 ${building.basementFloors}층 ~ 지상 ${building.groundFloors}층) 밖`);
+                const shiftNote = cleanFloor !== floor ? ` (엑셀 ${floor} → ${cleanFloor})` : '';
+                rejectRow(`${cleanDong} ${cleanFloor}${shiftNote}: 기준 설정 범위(지하 ${building.basementFloors}층 ~ 지상 ${building.groundFloors}층 + 지붕) 밖`);
                 return;
             }
 
@@ -673,6 +682,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                 affectedFloors: Array.from(affectedFloors),
                 processedCount,
                 couplerRowCount,
+                shiftedRowCount,
                 existingCount: 0
             };
             upload.existingCount = materials.filter(m =>
