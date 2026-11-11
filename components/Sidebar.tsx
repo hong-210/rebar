@@ -219,7 +219,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentProject, user, onExitPr
                 <NavItem to="/history" icon={History} label="이력 관리" isActive={location.pathname === '/history'} />
 
                 {/* 9. 3D 뷰어 (Beta) */}
-                <NavItem to="/3d-viewer" icon={Box} label="3D 모델 뷰어 (Beta)" isActive={location.pathname === '/3d-viewer'} />
+                <NavItem to="/3d-viewer" icon={Box} label="3D 진척 모델" isActive={location.pathname === '/3d-viewer'} />
 
                 {/* 10. 구성원 관리 (Admin Only) - Moved to bottom */}
                 {isAdmin && (

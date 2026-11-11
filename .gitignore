@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# 모델 샘플 (용량이 커서 저장소에 올리지 않음)
+sample/

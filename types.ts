@@ -74,6 +74,8 @@ export interface Project {
 }
 
 // 엑셀 일괄 업로드 결과 (같은 물량은 누적하지 않고 덮어쓴다. 교체 업로드는 기존 물량을 비우고 새로 채운다)
+export type MemberClass = 'H' | 'V';
+
 // 엑셀 업로드 방식: 교체(동 전체 비우고 새로) / 덮어쓰기(같은 항목은 새 값으로) / 추가(같은 항목은 기존 값에 더함)
 export type UploadMode = 'replace' | 'overwrite' | 'add';
 
@@ -100,6 +102,9 @@ export interface MaterialEntry {
     // 'Coupler'는 개수(EA)로 관리한다: 개수는 plannedQuantity/shopQuantity, 중량은 0.
     // 값이 없으면 철근(ton)이다.
     itemType?: 'Rebar' | 'Coupler';
+
+    // 부재 구분: 'H' 수평(슬래브·보·기초) / 'V' 수직(벽체·기둥·계단 등). 엑셀에서 알 수 없으면 비어 있다.
+    memberClass?: MemberClass;
 
     // Version Control for Planned Quantity
     // Map of Version Name -> Weight (e.g., { 'Rev.0': 1000, 'Rev.1': 1200 })

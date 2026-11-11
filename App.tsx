@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useCallback } from 'react'; // eslint-disable-line @typescript-eslint/no-unused-vars
+import React, { useState, useEffect, useCallback, lazy, Suspense } from 'react'; // eslint-disable-line @typescript-eslint/no-unused-vars
 import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { useLocalStorage } from './hooks/useLocalStorage';
 import { supabase, isSupabaseConfigured } from './utils/supabase';
@@ -20,7 +20,8 @@ import { InspectionTracker } from './components/InspectionTracker';
 import { ShopDrawingBox } from './components/ShopDrawingBox';
 import { OrderManagement } from './components/OrderManagement';
 import { MemberManagement } from './components/MemberManagement';
-import { ThreeDViewer } from './components/ThreeDViewer';
+// three.js가 커서 3D 화면을 열 때만 불러온다
+const ThreeDViewer = lazy(() => import('./components/ThreeDViewer').then(m => ({ default: m.ThreeDViewer })));
 import { Project, MaterialEntry, ConcreteEntry, HistoryLog, User, Issue, IssueStatus, Order, OrderStatus, ProjectRole, Inspection, InspectionResult, ShopDrawing, BatchUploadResult, UploadMode } from './types';
 
 const errorMessage = (err: unknown) =>
@@ -373,7 +374,7 @@ export default function App() {
         const base = materials.filter(m => !isCleared(m));
 
         const keyOf = (m: MaterialEntry) =>
-            [m.projectId, m.dong, m.floor, m.zone, m.diameter, m.strength, m.dataSource ?? 'Design', m.itemType ?? 'Rebar'].join('|');
+            [m.projectId, m.dong, m.floor, m.zone, m.diameter, m.strength, m.dataSource ?? 'Design', m.itemType ?? 'Rebar', m.memberClass ?? ''].join('|');
 
         const existingByKey = new Map<string, MaterialEntry[]>();
         base.forEach(m => {
@@ -945,7 +946,7 @@ export default function App() {
                         />
                         <Route path="/history" element={<HistoryLogViewer logs={logs.filter(l => l.projectId === currentProject.id)} />} />
                         
-                        <Route path="/3d-viewer" element={<ThreeDViewer />} />
+                        <Route path="/3d-viewer" element={<Suspense fallback={<div className="p-8 text-slate-500">3D 화면 불러오는 중...</div>}><ThreeDViewer currentProject={currentProject} user={currentUser} materials={materials} onBatchAddMaterials={handleBatchAddMaterials} /></Suspense>} />
 
                         <Route path="*" element={<Navigate to="/" replace />} />
                     </Routes>

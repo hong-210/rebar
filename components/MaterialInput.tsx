@@ -6,6 +6,7 @@ import { useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import { CouplerSummaryTable, isCoupler, formatEntryAmount } from './CouplerSummary';
 import { normalizeRebarSpec } from '../utils/rebarSpec';
+import { getFloorAbove, lowestFloorOf, classifyMember, isFoundationMember, isFloorInBuilding } from '../utils/floorBasis';
 
 // 엑셀을 읽은 뒤 교체/덮어쓰기 선택을 기다리는 업로드
 interface PendingUpload {
@@ -17,6 +18,7 @@ interface PendingUpload {
     processedCount: number;
     couplerRowCount: number;
     shiftedRowCount: number; // 실행 수평재 중 한 층 위로 옮긴 행 수
+    classCounts: { H: number; V: number; none: number }; // 수평/수직/구분 없음 행 수
     existingCount: number; // 파일에 든 동들의 같은 구분 기존 물량 건수
 }
 
@@ -389,22 +391,6 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
         XLSX.writeFile(wb, `물량입력양식_${isShop ? 'SHOP' : 'DESIGN'}.xlsx`);
     };
 
-    // 실행(n형)은 바닥판을 아래층 천장으로, SHOP(u형)은 위층 바닥으로 본다.
-    // 실행 수평재를 한 층 위로 올려 SHOP 기준에 맞춘다 (B3 -> B2, B1 -> 1F, 4F -> 5F)
-    const getFloorAbove = (floor: string): string => {
-        const basement = floor.match(/^B(\d+)$/);
-        if (basement) return Number(basement[1]) === 1 ? '1F' : `B${Number(basement[1]) - 1}`;
-        const ground = floor.match(/^(\d+)F$/);
-        if (ground) return `${Number(ground[1]) + 1}F`;
-        return floor;
-    };
-
-    // 슬래브·보·기초 등 수평재인지 (기둥·벽체·계단 등 수직재는 그대로 둔다)
-    const isHorizontalMember = (text: string) =>
-        !/수직|vertical/i.test(text) &&
-        /수평|horizontal|슬래브|slab|beam|girder|거더|기초|footing|매트|deck|데크|(?:^|[^가-힣])(?:큰|작은)?보(?![가-힣])/i.test(text);
-    const isFoundationMember = (text: string) => /기초|footing|매트|mat(?![a-z])/i.test(text);
-
     // 읽어 둔 엑셀 물량을 반영한다. replace면 파일에 든 동들의 같은 구분 기존 물량을 비우고 새로 채우고, add면 기존 값에 더한다.
     const applyUpload = (upload: PendingUpload, mode: UploadMode) => {
         setPendingUpload(null);
@@ -422,6 +408,8 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                 ? `\n(수평재 ${upload.shiftedRowCount}행: 실행 n형 → SHOP 기준으로 한 층 위로 반영, 최하층·기초는 그대로)`
                 : "\n(주의: 수평재로 인식된 행이 없어 층 변환을 하지 않았습니다. '구분' 칸에 수평/슬래브/보/기초 등이 적혀 있는지 확인하세요.)")
             : '';
+        const { H, V, none } = upload.classCounts;
+        const classInfo = `\n(부재 구분: 수평 ${H}행 / 수직 ${V}행${none > 0 ? ` / 구분 없음 ${none}행 → 3D 모델에서 층 전체 진척으로 표시` : ''})`;
         const couplerInfo = upload.couplerRowCount > 0 ? `\n(그중 커플러 ${upload.couplerRowCount}행: '구성' 칸 기준, 개수(EA)로 따로 저장)` : '';
         const applied = mode === 'replace'
             ? `- 교체: 기존 ${label} 물량 ${result.cleared}건 삭제 후 ${result.created}건 새로 반영`
@@ -429,7 +417,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                 ? `- 신규 ${result.created}건\n- 기존 물량에 더하기 ${result.merged}건 (같은 동/층/Zone/직경/강종은 기존 값 + 파일 값)`
                 : `- 신규 ${result.created}건\n- 기존 물량 덮어쓰기 ${result.replaced}건 (같은 동/층/Zone/직경/강종은 누적하지 않음)`)
                 + (result.duplicatesRemoved > 0 ? `\n- 이전 업로드로 중복 저장된 물량 ${result.duplicatesRemoved}건 정리` : '');
-        alert(`[${upload.dataSource} 모드] 처리 완료!${logicInfo}\n\n총 ${upload.processedCount}행 유효 데이터 -> ${upload.entries.length}개 항목으로 집계됨.${couplerInfo}\n(중량 단위: TON -> 내부 KG 변환 저장)\n\n[반영]\n${applied}\n\n[결과]\n${dongSummary}`);
+        alert(`[${upload.dataSource} 모드] 처리 완료!${logicInfo}${classInfo}\n\n총 ${upload.processedCount}행 유효 데이터 -> ${upload.entries.length}개 항목으로 집계됨.${couplerInfo}\n(중량 단위: TON -> 내부 KG 변환 저장)\n\n[반영]\n${applied}\n\n[결과]\n${dongSummary}`);
     };
 
     // 엑셀의 동 이름을 프로젝트 기준 설정의 동과 맞춘다 ('101' / '101 동' -> '101동')
@@ -437,15 +425,6 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
         const normalize = (s: string) => s.replace(/\s/g, '').replace(/동$/, '').toUpperCase();
         return currentProject.buildings.find(b => b.name === rawDong)
             ?? currentProject.buildings.find(b => normalize(b.name) === normalize(rawDong));
-    };
-
-    // 기준 설정의 층 범위(B{지하층수}~B1, 1F~{지상층수}F, 지붕 {지상층수+1}F) 안에 있는지
-    const isFloorInBuilding = (building: BuildingConfig, floor: string) => {
-        const basement = floor.match(/^B(\d+)$/);
-        if (basement) return Number(basement[1]) >= 1 && Number(basement[1]) <= building.basementFloors;
-        const ground = floor.match(/^(\d+)F$/);
-        if (ground) return Number(ground[1]) >= 1 && Number(ground[1]) <= building.groundFloors + 1;
-        return false; // PH, R 등 기준 설정에 없는 층
     };
 
     const processExcelData = (data: any[]) => {
@@ -471,7 +450,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             dia: ['철근직경', '직경', 'Dia', '규격'],
             strength: ['철근강종', '강종', 'Grade'],
             dong: ['동', 'Dong'],
-            standard: ['구분', '부재', '부재명', 'MemberType'],
+            standard: ['위치분류', '구분', '부재구분', '부재', '부재명', 'MemberType'],
             component: ['구성']
         } : {
             // SHOP 물량: [동, 층, 도면명, 직경, 강종, 샵중량, 구분]
@@ -488,6 +467,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
         const targetDongCounts: Record<string, number> = {};
         let couplerRowCount = 0;
         let shiftedRowCount = 0;
+        const classCounts = { H: 0, V: 0, none: 0 };
 
         // 기준 설정과 맞지 않는 행 (사유 -> 행 수). 하나라도 있으면 업로드 전체를 막는다.
         const rejected = new Map<string, number>();
@@ -591,14 +571,17 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
 
             // PIT는 최하층(B{지하층수}), RF는 지상층수 + 1층으로 본다
             let cleanFloor = String(floor);
-            const lowestFloor = building.basementFloors > 0 ? `B${building.basementFloors}` : '1F';
+            const lowestFloor = lowestFloorOf(building);
             if (cleanFloor === 'PIT') cleanFloor = lowestFloor;
             else if (cleanFloor === 'RF') cleanFloor = `${building.groundFloors + 1}F`;
 
+            // 수평재(슬래브·보·기초) / 수직재(벽체·기둥·계단) 구분은 3D 모델 색칠에도 쓴다
+            const memberText = `${getValue(config.standard) ?? ''} ${zone}`;
+            const memberClass = classifyMember(memberText);
+
             // SHOP 층은 그대로 두고, 실행 수평재만 한 층 위로 올린다 (최하층·기초는 그대로)
             if (dataSource === 'Design') {
-                const memberText = `${getValue(config.standard) ?? ''} ${zone}`;
-                if (isHorizontalMember(memberText) && !isFoundationMember(memberText) && cleanFloor !== lowestFloor) {
+                if (memberClass === 'H' && !isFoundationMember(memberText) && cleanFloor !== lowestFloor) {
                     cleanFloor = getFloorAbove(cleanFloor);
                     shiftedRowCount++;
                 }
@@ -614,7 +597,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             const weightKg = isCouplerRow ? 0 : valueWeight * 1000;
             const count = isCouplerRow ? valueWeight : 0;
 
-            const uniqueKey = `${cleanDong}|${cleanFloor}|${cleanZone}|${diaEnum}|${cleanStrength}|${itemType}`;
+            const uniqueKey = `${cleanDong}|${cleanFloor}|${cleanZone}|${diaEnum}|${cleanStrength}|${itemType}|${memberClass ?? ''}`;
 
             if (aggregationMap.has(uniqueKey)) {
                 const existingEntry = aggregationMap.get(uniqueKey)!;
@@ -645,6 +628,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                     lengthMm: 0,
                     dataSource: dataSource,
                     ...(isCouplerRow ? { itemType: 'Coupler' as const } : {}),
+                    ...(memberClass ? { memberClass } : {}),
                     plannedQuantity: dataSource === 'Design' ? count : 0,
                     plannedWeight: Number(pWeight.toFixed(2)),
                     shopQuantity: dataSource === 'Shop' ? count : 0,
@@ -656,6 +640,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             }
 
             processedCount++;
+            classCounts[memberClass ?? 'none']++;
             if (isCouplerRow) couplerRowCount++;
             if (cleanDong === selectedDong) {
                 affectedFloors.add(cleanFloor);
@@ -685,6 +670,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                 processedCount,
                 couplerRowCount,
                 shiftedRowCount,
+                classCounts,
                 existingCount: 0
             };
             upload.existingCount = materials.filter(m =>
