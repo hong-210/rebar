@@ -6,7 +6,7 @@ import { useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import { CouplerSummaryTable, isCoupler, formatEntryAmount } from './CouplerSummary';
 import { normalizeRebarSpec } from '../utils/rebarSpec';
-import { getFloorAbove, lowestFloorOf, classifyMember, isFoundationMember, isFloorInBuilding } from '../utils/floorBasis';
+import { getFloorAbove, lowestFloorOf, classifyMember, isFoundationMember, isFloorInBuilding, resolveNamedFloor, roofFloorsOf, topFloorOf, floorLabel } from '../utils/floorBasis';
 
 // 엑셀을 읽은 뒤 교체/덮어쓰기 선택을 기다리는 업로드
 interface PendingUpload {
@@ -193,7 +193,9 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             for (let i = currentBuildingConfig.basementFloors; i >= 1; i--) {
                 floorSet.add(`B${i}`);
             }
-            for (let i = 1; i <= currentBuildingConfig.groundFloors; i++) {
+            // 모델에서 가져온 지붕층(RF, PHF ...)이 있으면 함께 보여준다
+            const top = currentBuildingConfig.roofFloors?.length ? topFloorOf(currentBuildingConfig) : currentBuildingConfig.groundFloors;
+            for (let i = 1; i <= top; i++) {
                 floorSet.add(`${i}F`);
             }
         }
@@ -376,7 +378,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             ['항목', '작성 방법'],
             ['구성', "철근이면 '철근', 커플러면 '커플러'로 적습니다. 비워 두면 철근으로 봅니다."],
             ['중량 / 개수', '철근은 중량(ton), 커플러는 개수(EA)를 같은 칸에 적습니다.'],
-            ['동 / 층', "프로젝트 설정에 있는 동 이름과 층 범위 안이어야 업로드됩니다. (예: 4F, B1) 'PIT'는 최하층(지하층수), 'RF'·'지붕'은 지상층수+1층으로 반영됩니다."],
+            ['동 / 층', "프로젝트 설정에 있는 동 이름과 층 범위 안이어야 업로드됩니다. (예: 4F, B1) 'PIT'는 최하층(지하층수), 'RF'·'PHF' 등 지붕층은 프로젝트 설정의 지붕층 이름 순서대로 지상층수+1층부터 반영됩니다."],
             ['직경', '커플러도 직경(예: 25)을 적어야 합니다. 직경이 없는 행은 건너뜁니다.'],
             ['내진(S)', "직경에 S를 붙이거나(D22S) 강종에 붙이면(SD600S) 모두 'D22 / SD600S'로 같게 반영됩니다. 강종 숫자 없이 S만 적거나(강종 'S') 직경에만 S가 있으면(22S) '미기재(S)'로 반영됩니다."],
             ['강종', "적으면 철근·커플러 모두 그대로 반영됩니다. 비워 두면 '미기재'로 표시됩니다."],
@@ -503,11 +505,9 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                 const fStr = String(floorRaw).trim().toUpperCase();
                 const numVal = parseInt(fStr);
                 
-                // PIT는 최하층, RF/지붕은 최상층 위 (동을 찾은 뒤 실제 층으로 바꾼다)
-                if (/PIT|피트/.test(fStr)) floor = 'PIT';
-                else if (/^(RF|ROOF|R|지붕|지붕층)$/.test(fStr)) floor = 'RF';
+                // PIT·RF·PHF처럼 이름으로 적힌 층은 동을 찾은 뒤 기준 설정의 지붕층 이름으로 바꾼다
                 // Pure Number Case: -1 => B1, 1 => 1F
-                else if (!isNaN(numVal) && String(numVal) === fStr) {
+                if (!isNaN(numVal) && String(numVal) === fStr) {
                     if (numVal < 0) floor = `B${Math.abs(numVal)}`;
                     else if (numVal > 0) floor = `${numVal}F`;
                     else floor = '1F'; // 0 -> 1F fallback
@@ -521,8 +521,6 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                         } else {
                             floor = `${numbers}F`;
                         }
-                    } else if (fStr === 'PH') {
-                         floor = fStr; 
                     }
                 }
             }
@@ -561,19 +559,18 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                 rejectRow(`동 '${rawDong || '(빈칸)'}': 기준 설정에 없는 동`);
                 return;
             }
-            if (!floor) {
-                rejectRow(`${building.name} 층 '${floorRaw ?? '(빈칸)'}': 인식할 수 없는 층 표기`);
+            const namedFloor = resolveNamedFloor(building, String(floorRaw ?? ''));
+            if (!floor && !namedFloor) {
+                rejectRow(`${building.name} 층 '${floorRaw ?? '(빈칸)'}': 인식할 수 없는 층 표기 (지붕층 이름: ${roofFloorsOf(building).join(', ')})`);
                 return;
             }
 
             const cleanDong = building.name;
             const cleanZone = String(zone);
 
-            // PIT는 최하층(B{지하층수}), RF는 지상층수 + 1층으로 본다
-            let cleanFloor = String(floor);
+            // PIT는 최하층(B{지하층수}), RF·PHF 등은 기준 설정의 지붕층 순서대로 지상층수 + 1층부터
+            let cleanFloor = namedFloor ?? String(floor);
             const lowestFloor = lowestFloorOf(building);
-            if (cleanFloor === 'PIT') cleanFloor = lowestFloor;
-            else if (cleanFloor === 'RF') cleanFloor = `${building.groundFloors + 1}F`;
 
             // 수평재(슬래브·보·기초) / 수직재(벽체·기둥·계단) 구분은 3D 모델 색칠에도 쓴다
             const memberText = `${getValue(config.standard) ?? ''} ${zone}`;
@@ -589,7 +586,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
 
             if (!isFloorInBuilding(building, cleanFloor)) {
                 const shiftNote = cleanFloor !== floor ? ` (엑셀 ${floor} → ${cleanFloor})` : '';
-                rejectRow(`${cleanDong} ${cleanFloor}${shiftNote}: 기준 설정 범위(지하 ${building.basementFloors}층 ~ 지상 ${building.groundFloors}층 + 지붕) 밖`);
+                rejectRow(`${cleanDong} ${cleanFloor}${shiftNote}: 기준 설정 범위(지하 ${building.basementFloors}층 ~ 지상 ${building.groundFloors}층 + 지붕 ${roofFloorsOf(building).join(', ')}) 밖`);
                 return;
             }
 
@@ -772,7 +769,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                 <div className="col-span-2 md:col-span-1">
                     <label className="block text-[10px] font-bold text-slate-500 mb-1">FLOOR</label>
                     <select value={targetFloor} onChange={e => setTargetFloor(e.target.value)} className="w-full px-2 py-1.5 border border-slate-300 rounded text-sm font-bold text-slate-800">
-                        {displayFloorList.map(f => <option key={f} value={f}>{f}</option>)}
+                        {displayFloorList.map(f => <option key={f} value={f}>{floorLabel(currentBuildingConfig, f)}</option>)}
                     </select>
                 </div>
                 <div className="col-span-2 md:col-span-1">
@@ -940,7 +937,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                                     return (
                                         <div key={floor} className="px-4 py-3 flex items-center justify-between hover:bg-slate-50">
                                             <div className="flex items-center gap-4 w-1/3">
-                                                <div className={`w-8 h-8 rounded flex items-center justify-center text-sm font-bold ${floor.startsWith('B') ? 'bg-slate-200 text-slate-700' : 'bg-blue-100 text-blue-700'}`}>{floor}</div>
+                                                <div className={`w-8 h-8 rounded flex items-center justify-center text-sm font-bold ${floor.startsWith('B') ? 'bg-slate-200 text-slate-700' : 'bg-blue-100 text-blue-700'}`} title={floorLabel(currentBuildingConfig, floor)}>{floorLabel(currentBuildingConfig, floor).split(' (')[0]}</div>
                                                 <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
                                                     <div className={`h-full ${pg > 100 ? 'bg-red-500' : 'bg-blue-500'}`} style={{ width: `${Math.min(pg, 100)}%` }}></div>
                                                 </div>

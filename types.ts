@@ -43,6 +43,9 @@ export interface BuildingConfig {
     name: string;
     groundFloors: number;
     basementFloors: number;
+    // 지상층 위의 지붕층 이름 (지상층수+1층부터 차례로, 예: ['RF', 'PHF', 'PHRF']). 없으면 ['RF']
+    roofFloors?: string[];
+    modelFile?: string; // 층 정보를 가져온 모델 파일
 }
 
 export interface ProjectVersion {

@@ -2,20 +2,27 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Box, UploadCloud, Trash2, Loader2, Info, X, RefreshCw, CheckCircle2 } from 'lucide-react';
-import { BatchUploadResult, MaterialEntry, MemberClass, Project, UploadMode, User } from '../types';
+import { BatchUploadResult, BuildingConfig, MaterialEntry, MemberClass, Project, UploadMode, User } from '../types';
 import { isCoupler } from './CouplerSummary';
 import type { SabBody, SabModel, SabProgress } from '../utils/sabParser';
-import { StoredModelMeta, LoadedModel, listModels, saveModel, loadModel, deleteModel } from '../utils/modelStorage';
-import type { ModelMember } from '../utils/rebarCsv';
+import { StoredModelMeta, LoadedModel, listModels, saveModelParts, loadModel, deleteModel } from '../utils/modelStorage';
+import type { ModelMember, RebarCsvResult } from '../utils/rebarCsv';
 import { buildDesignEntries } from '../utils/modelQuantities';
-import { modelBodyCompareFloor, modelFloorName, isHorizontalModelType, modelBodyClass } from '../utils/floorBasis';
+import {
+    modelBodyCompareFloor, modelFloorName, isHorizontalModelType, modelBodyClass,
+    buildingFromModelFloors, sameBuildingName, roofFloorsOf, floorLabel as labelFloor
+} from '../utils/floorBasis';
 
 interface ThreeDViewerProps {
     currentProject: Project;
     user: User;
     materials: MaterialEntry[];
     onBatchAddMaterials: (entries: MaterialEntry[], mode: UploadMode) => BatchUploadResult;
+    onUpdateProject: (project: Project) => void;
 }
+
+// 동 선택에서 '모델에서 새 동 추가'
+const NEW_DONG = '__new__';
 
 interface FloorProgress {
     planned: number; // kg
@@ -83,12 +90,12 @@ interface Scene3D {
     dispose: () => void;
 }
 
-export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user, materials, onBatchAddMaterials }) => {
+export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user, materials, onBatchAddMaterials, onUpdateProject }) => {
     const userRole = currentProject.members.find(m => m.userId === user.email)?.role || 'Guest';
     const canEdit = userRole === 'Admin' || userRole === 'Participant';
 
     const [models, setModels] = useState<StoredModelMeta[]>([]);
-    const [selectedDong, setSelectedDong] = useState(currentProject.buildings[0]?.name ?? '');
+    const [selectedDong, setSelectedDong] = useState(currentProject.buildings[0]?.name ?? NEW_DONG);
     const [model, setModel] = useState<LoadedModel | null>(null);
     const [busy, setBusy] = useState<Busy>(null);
     const [error, setError] = useState('');
@@ -112,8 +119,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
         setModel(null);
         setPicked(null);
         setSelectedFloor(null);
-        setNotice('');
-        if (!selectedDong) return;
+        if (!selectedDong || selectedDong === NEW_DONG) return;
         let cancelled = false;
         setBusy({ label: '저장된 모델 불러오는 중' });
         loadModel(currentProject.id, selectedDong)
@@ -297,7 +303,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
     }, [model]);
 
     // 모델의 부재별 실행 물량으로 이 동의 실행 물량을 교체한다 (확인 후)
-    const applyModelQuantities = (members: ModelMember[]) => {
+    const applyModelQuantities = (members: ModelMember[], building: BuildingConfig | undefined) => {
         if (!building) return;
         const r = buildDesignEntries(members, building, currentProject.id);
         if (r.entries.length === 0) {
@@ -323,23 +329,65 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
         setNotice(`${building.name} 실행 물량을 모델 기준으로 반영했습니다: 철근 ${r.ton.toFixed(1)} t, 커플러 ${Math.round(r.ea).toLocaleString()}개`);
     };
 
+    // 모델(물량 CSV)의 동 이름으로 올릴 동을 정한다. 선택한 동이 있으면 그 동, '새 동 추가'면 이름이 같은 동이나 새 동
+    const resolveTarget = (info: RebarCsvResult | undefined, fileName: string) => {
+        const selected = currentProject.buildings.find(b => b.name === selectedDong);
+        const modelName = info?.buildingName || fileName.replace(/\.(sab|csv)$/i, '').replace(/_rebar$/i, '').split('_').pop() || fileName;
+        const existing = selected ?? currentProject.buildings.find(b => sameBuildingName(b.name, modelName));
+        return { selected, modelName, existing, name: existing?.name ?? modelName };
+    };
+
+    // 모델의 동 이름·층 정보를 프로젝트 설정과 맞춘다 (다르면 확인 후 갱신, 없으면 추가).
+    // 반영할 동 설정을 돌려주고, 대상 동이 없는데 추가를 취소하면 undefined
+    const syncBuildingFromModel = (info: RebarCsvResult, sourceFile: string): BuildingConfig | undefined => {
+        const { selected, modelName, existing: target } = resolveTarget(info, sourceFile);
+        const fromModel = buildingFromModelFloors(target?.name ?? modelName, info.floors, sourceFile);
+        const describe = (b: BuildingConfig) =>
+            `지하 ${b.basementFloors}층 / 지상 ${b.groundFloors}층 / 지붕층 ${roofFloorsOf(b).join(', ')}`;
+
+        if (target && describe(target) === describe(fromModel)) {
+            if (target.modelFile !== sourceFile) {
+                onUpdateProject({ ...currentProject, buildings: currentProject.buildings.map(b => (b === target ? fromModel : b)) });
+            }
+            return fromModel;
+        }
+        const nameNote = selected && !sameBuildingName(selected.name, modelName)
+            ? `\n\n※ 선택한 동(${selected.name})과 모델의 동 이름(${modelName})이 다릅니다. 동을 다시 확인하세요.`
+            : '';
+        const ok = confirm(target
+            ? `${target.name} 층 정보를 모델 기준으로 바꿀까요?\n\n- 현재 설정: ${describe(target)}\n- 모델: ${describe(fromModel)}${nameNote}\n\n취소하면 현재 설정을 그대로 씁니다.`
+            : `모델의 동 '${modelName}'이(가) 프로젝트 설정에 없습니다. 새 동으로 추가할까요?\n\n- ${describe(fromModel)}`);
+        if (!ok) return target;
+        onUpdateProject({
+            ...currentProject,
+            buildings: target
+                ? currentProject.buildings.map(b => (b === target ? fromModel : b))
+                : [...currentProject.buildings, fromModel]
+        });
+        return fromModel;
+    };
+
+    // 형상(.sab)과 물량(_rebar.csv)은 함께 올려도, 따로 올려도 된다. 올린 쪽만 바꾸고 다른 쪽은 그대로 둔다.
     const handleFiles = (files: File[]) => {
         if (!selectedDong) return;
         const sab = files.find(f => /\.sab$/i.test(f.name));
         const csvs = files.filter(f => /\.csv$/i.test(f.name));
         const csv = csvs.find(f => /rebar/i.test(f.name)) ?? csvs[0];
-        if (!sab) {
-            setError('.sab 파일이 없습니다. 빌더허브 폴더의 Models 안에서 .sab 파일(과 _rebar.csv)을 함께 골라 주세요.');
+        if (!sab && !csv) {
+            setError('빌더허브 폴더의 Models 안에서 .sab 파일이나 _rebar.csv 파일을 골라 주세요.');
             return;
         }
-        if (storedModel && !confirm(`${selectedDong}에 이미 모델(${storedModel.fileName})이 있습니다. 새 파일로 바꿀까요?`)) return;
+        if (selectedDong === NEW_DONG && !csv) {
+            setError('새 동을 모델에서 추가하려면 동 이름과 층 정보가 든 _rebar.csv를 골라 주세요.');
+            return;
+        }
         setError('');
-        setNotice(csv ? '' : '물량 CSV 없이 형상만 올렸습니다. 실행 물량도 모델에서 가져오려면 같은 폴더의 _rebar.csv를 함께 골라 주세요.');
-        setBusy({ label: '모델 변환 중', ratio: 0 });
+        setNotice('');
+        setBusy(sab ? { label: '모델 변환 중', ratio: 0 } : { label: '물량 CSV 읽는 중' });
         const worker = new Worker(new URL('../utils/sabWorker.ts', import.meta.url), { type: 'module' });
         worker.onmessage = async (e: MessageEvent) => {
             const msg = e.data as ({ type: 'progress'; stage?: 'csv' } & SabProgress)
-                | { type: 'done'; model: SabModel; members?: ModelMember[] }
+                | { type: 'done'; model?: SabModel; quantities?: RebarCsvResult }
                 | { type: 'error'; message: string };
             if (msg.type === 'progress') {
                 setBusy(msg.stage === 'csv'
@@ -348,49 +396,101 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                 return;
             }
             worker.terminate();
+            setBusy(null);
             if (msg.type === 'error') {
-                setBusy(null);
-                setError(`변환 실패: ${msg.message}`);
+                setError(`읽기 실패: ${msg.message}`);
                 return;
             }
-            if (msg.model.bodies.length === 0) {
-                setBusy(null);
+            const { model: sabModel, quantities } = msg;
+            if (sabModel && sabModel.bodies.length === 0) {
                 setError('파일에서 부재를 찾지 못했습니다. 빌더허브 모델의 .sab 파일인지 확인하세요.');
                 return;
             }
-            const members = msg.members;
+            const members = quantities?.members;
+            if (quantities && members?.length === 0) {
+                setError('물량 CSV에서 철근 물량을 찾지 못했습니다.');
+                return;
+            }
+
+            // 1. 이미 올린 정보를 바꾸는지, 형상과 물량이 같은 모델인지 확인한다
+            const dest = resolveTarget(quantities, (csv ?? sab)!.name);
+            const destMeta = models.find(m => m.dong === dest.name);
+            const stored = destMeta ? await loadModel(currentProject.id, dest.name).catch(() => null) : null;
+            const replaced = [
+                sab && destMeta?.fileName ? `- 모델 형상: ${destMeta.fileName} → ${sab.name}` : '',
+                csv && destMeta?.csvFileName ? `- 모델 물량: ${destMeta.csvFileName} → ${csv.name}` : '',
+            ].filter(Boolean);
+            const finalBodies = sabModel?.bodies ?? stored?.bodies ?? [];
+            const finalMembers = members ?? stored?.members ?? [];
+            let mismatch = '';
+            if (finalBodies.length && finalMembers.length) {
+                const ids = new Set(finalBodies.map(b => b.msId));
+                const ratio = finalMembers.filter(m => ids.has(m.msId)).length / finalMembers.length;
+                if (ratio < 0.5) mismatch = `※ 형상과 물량의 부재 ID가 ${Math.round(ratio * 100)}%만 맞습니다. 서로 다른 모델의 파일일 수 있습니다.`;
+            }
+            if (replaced.length || mismatch) {
+                const ok = confirm(
+                    (replaced.length
+                        ? `${dest.name}에 이미 올린 정보가 있습니다. 계속하면 아래 기존 정보는 지워지고 새 파일로 바뀝니다.\n\n${replaced.join('\n')}`
+                        : `${dest.name} 모델 파일을 확인해 주세요.`) +
+                    (mismatch ? `\n\n${mismatch}` : '') +
+                    '\n\n계속할까요?'
+                );
+                if (!ok) return;
+            }
+
+            // 2. 물량 CSV가 있으면 동 이름·층 정보를 프로젝트 설정에 맞춘다
+            const target = quantities ? syncBuildingFromModel(quantities, csv!.name) : building;
+            if (!target) {
+                setError('모델을 올릴 동이 없어 취소했습니다.');
+                return;
+            }
+
+            // 3. 올린 쪽만 바꿔 저장한다
             try {
                 setBusy({ label: '브라우저에 저장 중' });
-                await saveModel(currentProject.id, selectedDong, sab.name, msg.model,
-                    members && csv ? { csvFileName: csv.name, members } : undefined);
+                await saveModelParts(currentProject.id, target.name, {
+                    sab: sabModel && sab ? { fileName: sab.name, model: sabModel } : undefined,
+                    csv: members && csv ? { fileName: csv.name, members } : undefined,
+                });
                 await refreshModels();
-                setModel({ bodies: msg.model.bodies, positions: msg.model.positions, members });
+                if (target.name !== selectedDong) setSelectedDong(target.name);
+                else setModel({
+                    bodies: finalBodies,
+                    positions: sabModel?.positions ?? stored?.positions ?? new Float32Array(0),
+                    members: finalMembers.length ? finalMembers : undefined
+                });
             } catch (err) {
                 setError(`저장 실패: ${err instanceof Error ? err.message : String(err)}`);
                 return;
             } finally {
                 setBusy(null);
             }
-            if (members?.length) applyModelQuantities(members);
+
+            if (!finalMembers.length) setNotice('형상만 올렸습니다. 같은 폴더의 _rebar.csv를 올리면 실행 물량과 층 정보가 추가됩니다.');
+            else if (!finalBodies.length) setNotice('물량만 올렸습니다. 같은 폴더의 .sab를 올리면 3D 형상이 추가됩니다.');
+
+            // 4. 새 물량이면 이 동의 실행 물량을 모델 기준으로 바꿀지 묻는다
+            if (members?.length) applyModelQuantities(members, target);
         };
         worker.onerror = e => {
             worker.terminate();
             setBusy(null);
-            setError(`변환 실패: ${e.message}`);
+            setError(`읽기 실패: ${e.message}`);
         };
         worker.postMessage({ sab, csv });
     };
 
     const handleDelete = async () => {
-        if (!storedModel || !confirm(`${selectedDong} 모델을 삭제할까요? (물량 데이터는 그대로입니다)`)) return;
+        if (!storedModel || !confirm(`${selectedDong} 모델(형상·모델 물량)을 삭제할까요? (철근 물량 관리에 반영된 물량은 그대로입니다)`)) return;
         await deleteModel(currentProject.id, selectedDong);
         await refreshModels();
         setModel(null);
     };
 
     const pickedFloor = picked && building ? modelBodyCompareFloor(picked.type, picked.floor, building) : null;
-    // 지상층수 + 1층은 지붕(RF)이다 (업로드할 때 RF를 이 층으로 받는다)
-    const floorLabel = (f: string) => (building && f === `${building.groundFloors + 1}F` ? `RF (${f})` : f);
+    // 지붕층은 이름을 함께 보여준다 (RF (19F), PHF (20F))
+    const floorLabel = (f: string) => labelFloor(building, f);
 
     return (
         <div className="h-full flex flex-col space-y-4">
@@ -404,7 +504,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                 <div className="flex items-center gap-2">
                     <select
                         value={selectedDong}
-                        onChange={e => setSelectedDong(e.target.value)}
+                        onChange={e => { setSelectedDong(e.target.value); setNotice(''); }}
                         className="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white"
                     >
                         {currentProject.buildings.map(b => (
@@ -412,6 +512,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                                 {b.name}{models.some(m => m.dong === b.name) ? ' (모델 있음)' : ''}
                             </option>
                         ))}
+                        {canEdit && <option value={NEW_DONG}>+ 모델에서 새 동 추가</option>}
                     </select>
                     {canEdit && (
                         <>
@@ -430,14 +531,14 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                             <button
                                 onClick={() => fileInputRef.current?.click()}
                                 disabled={!!busy || !selectedDong}
-                                title="Models 폴더에서 .sab 와 _rebar.csv 를 함께 선택"
+                                title="Models 폴더의 .sab(형상)와 _rebar.csv(물량) - 함께 또는 따로"
                                 className="flex items-center gap-1.5 px-3 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium whitespace-nowrap hover:bg-blue-700 disabled:opacity-50"
                             >
-                                <UploadCloud size={16} /> 모델 올리기 (.sab + 물량 CSV)
+                                <UploadCloud size={16} /> 모델 올리기 (.sab / 물량 CSV)
                             </button>
                             {model?.members?.length ? (
                                 <button
-                                    onClick={() => applyModelQuantities(model.members!)}
+                                    onClick={() => applyModelQuantities(model.members!, building)}
                                     disabled={!!busy}
                                     title="저장된 모델 물량으로 이 동의 실행 물량을 다시 반영"
                                     className="flex items-center gap-1.5 px-3 py-2 border border-slate-300 text-slate-700 rounded-lg text-sm font-medium whitespace-nowrap hover:bg-slate-50 disabled:opacity-50"
@@ -478,14 +579,20 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                 <div className="relative bg-slate-50 rounded-xl border border-slate-200 overflow-hidden min-h-[420px]">
                     <div ref={containerRef} className="absolute inset-0" />
 
-                    {!model && !busy && (
+                    {!model?.bodies.length && !busy && (
                         <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-8 text-slate-500">
                             <Box size={40} className="text-slate-300 mb-3" />
-                            <p className="font-bold text-slate-700 mb-1">{selectedDong} 모델이 없습니다</p>
+                            <p className="font-bold text-slate-700 mb-1">
+                                {selectedDong === NEW_DONG
+                                    ? '모델을 올리면 동 이름과 층 정보를 읽어 프로젝트 설정에 추가합니다'
+                                    : model?.members?.length
+                                        ? `${selectedDong} 물량은 올라와 있고, 형상(.sab)이 없습니다`
+                                        : `${selectedDong} 모델이 없습니다`}
+                            </p>
                             <p className="text-sm max-w-md">
                                 빌더허브 프로젝트 폴더의 <span className="font-mono text-xs bg-white px-1 rounded border">이름.rhb.Data/Models</span> 에서
-                                <span className="font-mono text-xs bg-white px-1 rounded border">.sab</span> 파일과 <span className="font-mono text-xs bg-white px-1 rounded border">_rebar.csv</span> 파일을 함께 골라 주세요.
-                                물량 CSV가 있으면 이 동의 실행 물량도 모델 기준으로 반영할 수 있습니다. 변환한 모델은 이 브라우저에만 저장됩니다.
+                                <span className="font-mono text-xs bg-white px-1 rounded border">.sab</span>(3D 형상)와 <span className="font-mono text-xs bg-white px-1 rounded border">_rebar.csv</span>(실행 물량·층 정보)를 올려 주세요.
+                                함께 올려도, 따로 올려도 됩니다. 변환한 모델은 이 브라우저에만 저장됩니다.
                             </p>
                         </div>
                     )}
@@ -504,7 +611,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                         </div>
                     )}
 
-                    {model && (
+                    {!!model?.bodies.length && (
                         <div className="absolute left-3 bottom-3 bg-white/90 rounded-lg shadow-sm border border-slate-200 px-3 py-2 text-xs text-slate-600 space-y-1">
                             {[
                                 [COLOR_NOT_STARTED, '실행만 (0%)'],
@@ -582,7 +689,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                         {storedModel && (
                             <p className="text-[11px] text-slate-400 mt-2 flex items-start gap-1">
                                 <Info size={12} className="mt-0.5 shrink-0" />
-                                {storedModel.fileName} · 부재 {storedModel.bodyCount.toLocaleString()}개 · {(storedModel.storedBytes / 1e6).toFixed(1)} MB · {new Date(storedModel.uploadedAt).toLocaleDateString()}
+                                형상 {storedModel.fileName ? `${storedModel.fileName} (부재 ${storedModel.bodyCount.toLocaleString()}개, ${(storedModel.storedBytes / 1e6).toFixed(1)} MB)` : '없음'} · 물량 {storedModel.csvFileName ?? '없음'} · {new Date(storedModel.uploadedAt).toLocaleDateString()}
                             </p>
                         )}
                     </div>

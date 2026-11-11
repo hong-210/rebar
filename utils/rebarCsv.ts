@@ -20,6 +20,13 @@ export interface ModelMember {
     items: MemberQtyItem[];
 }
 
+// CSV 한 파일의 결과: 부재별 물량 + 동 이름과 층 목록 (프로젝트 동 설정에 쓴다)
+export interface RebarCsvResult {
+    members: ModelMember[];
+    buildingName: string;
+    floors: { no: number; name: string }[];
+}
+
 // 따옴표 안의 쉼표·줄바꿈을 처리하는 CSV 파서
 function parseCsv(text: string, onRow: (cells: string[]) => void) {
     let cells: string[] = [];
@@ -50,9 +57,11 @@ function parseCsv(text: string, onRow: (cells: string[]) => void) {
     if (cell || cells.length) { cells.push(cell); onRow(cells); }
 }
 
-export function parseRebarCsv(text: string): ModelMember[] {
+export function parseRebarCsv(text: string): RebarCsvResult {
     let col: Record<string, number> | null = null;
     const members = new Map<number, ModelMember>();
+    const floors = new Map<number, string>();
+    const buildingNames = new Map<string, number>();
     const required = ['객체ID', '층번호', '구성', '값', '철근직경', '철근강종'];
 
     parseCsv(text.replace(/^﻿/, ''), cells => {
@@ -63,6 +72,11 @@ export function parseRebarCsv(text: string): ModelMember[] {
             return;
         }
         const get = (k: string) => (col![k] === undefined ? '' : (cells[col![k]] ?? '').trim());
+        const floorNo = parseInt(get('층번호'));
+        if (!isNaN(floorNo) && !floors.has(floorNo)) floors.set(floorNo, get('층이름'));
+        const bName = get('건물명');
+        if (bName) buildingNames.set(bName, (buildingNames.get(bName) ?? 0) + 1);
+
         const msId = parseInt(get('객체ID'));
         const value = parseFloat(get('값'));
         if (isNaN(msId) || !(value > 0)) return;
@@ -72,7 +86,7 @@ export function parseRebarCsv(text: string): ModelMember[] {
             const cls = get('위치분류');
             m = {
                 msId,
-                floorNo: parseInt(get('층번호')),
+                floorNo,
                 floorName: get('층이름'),
                 memberClass: cls === '수평' ? 'H' : cls === '수직' ? 'V' : undefined,
                 kind: get('부재구분') || get('부재'),
@@ -90,5 +104,10 @@ export function parseRebarCsv(text: string): ModelMember[] {
     });
 
     if (!col) throw new Error('CSV가 비어 있습니다.');
-    return Array.from(members.values());
+    const buildingName = Array.from(buildingNames.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
+    return {
+        members: Array.from(members.values()),
+        buildingName,
+        floors: Array.from(floors.entries()).map(([no, name]) => ({ no, name }))
+    };
 }

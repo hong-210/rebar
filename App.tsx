@@ -946,7 +946,7 @@ export default function App() {
                         />
                         <Route path="/history" element={<HistoryLogViewer logs={logs.filter(l => l.projectId === currentProject.id)} />} />
                         
-                        <Route path="/3d-viewer" element={<Suspense fallback={<div className="p-8 text-slate-500">3D 화면 불러오는 중...</div>}><ThreeDViewer currentProject={currentProject} user={currentUser} materials={materials} onBatchAddMaterials={handleBatchAddMaterials} /></Suspense>} />
+                        <Route path="/3d-viewer" element={<Suspense fallback={<div className="p-8 text-slate-500">3D 화면 불러오는 중...</div>}><ThreeDViewer currentProject={currentProject} user={currentUser} materials={materials} onBatchAddMaterials={handleBatchAddMaterials} onUpdateProject={handleUpdateProject} /></Suspense>} />
 
                         <Route path="*" element={<Navigate to="/" replace />} />
                     </Routes>

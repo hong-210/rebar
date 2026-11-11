@@ -222,6 +222,11 @@ export const ProjectSettings: React.FC<ProjectSettingsProps> = ({ currentProject
                                                 className="w-full font-bold text-slate-800 border-b border-slate-200 focus:border-blue-500 focus:outline-none py-1"
                                                 disabled={!canEdit}
                                             />
+                                            {building.modelFile && (
+                                                <p className="text-[11px] text-emerald-600 mt-1" title="3D 진척 모델에서 모델을 올릴 때 층 정보를 가져왔습니다">
+                                                    모델 기준 · {building.modelFile}
+                                                </p>
+                                            )}
                                         </div>
                                         <div className="w-full md:w-32">
                                             <label className="text-xs text-slate-400 font-bold uppercase">지상층 (Ground)</label>
@@ -250,6 +255,21 @@ export const ProjectSettings: React.FC<ProjectSettingsProps> = ({ currentProject
                                                 />
                                                 <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-xs text-slate-400">F</span>
                                             </div>
+                                        </div>
+                                        <div className="w-full md:w-48">
+                                            <label className="text-xs text-slate-400 font-bold uppercase" title="지상층수 + 1층부터 차례로 붙는 지붕층 이름 (쉼표로 구분)">지붕층 (Roof)</label>
+                                            <input
+                                                type="text"
+                                                defaultValue={(building.roofFloors?.length ? building.roofFloors : ['RF']).join(', ')}
+                                                key={`${building.name}|${(building.roofFloors ?? []).join(',')}`}
+                                                onBlur={e => {
+                                                    const names = e.target.value.split(',').map(v => v.trim()).filter(Boolean);
+                                                    updateBuildingConfig(idx, 'roofFloors', names.length ? names : undefined);
+                                                }}
+                                                placeholder="RF, PHF"
+                                                className="w-full px-3 py-2 border border-slate-200 rounded font-medium focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                                                disabled={!canEdit}
+                                            />
                                         </div>
                                         <div className="flex items-end h-full pb-1">
                                              <button 
