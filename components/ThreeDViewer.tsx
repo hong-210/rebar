@@ -329,7 +329,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
         setNotice(`${building.name} 실행 물량을 모델 기준으로 반영했습니다: 철근 ${r.ton.toFixed(1)} t, 커플러 ${Math.round(r.ea).toLocaleString()}개`);
     };
 
-    // 모델(물량 CSV)의 동 이름으로 올릴 동을 정한다. 선택한 동이 있으면 그 동, '새 동 추가'면 이름이 같은 동이나 새 동
+    // 모델 물량(CSV·산출서 엑셀)의 동 이름으로 올릴 동을 정한다. 선택한 동이 있으면 그 동, '새 동 추가'면 이름이 같은 동이나 새 동
     const resolveTarget = (info: RebarCsvResult | undefined, fileName: string) => {
         const selected = currentProject.buildings.find(b => b.name === selectedDong);
         const modelName = info?.buildingName || fileName.replace(/\.(sab|csv)$/i, '').replace(/_rebar$/i, '').split('_').pop() || fileName;
@@ -367,23 +367,23 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
         return fromModel;
     };
 
-    // 형상(.sab)과 물량(_rebar.csv)은 함께 올려도, 따로 올려도 된다. 올린 쪽만 바꾸고 다른 쪽은 그대로 둔다.
+    // 형상(.sab)과 물량(_rebar.csv 또는 산출서 엑셀)은 함께 올려도, 따로 올려도 된다. 올린 쪽만 바꾸고 다른 쪽은 그대로 둔다.
     const handleFiles = (files: File[]) => {
         if (!selectedDong) return;
         const sab = files.find(f => /\.sab$/i.test(f.name));
-        const csvs = files.filter(f => /\.csv$/i.test(f.name));
-        const csv = csvs.find(f => /rebar/i.test(f.name)) ?? csvs[0];
+        const qtyFiles = files.filter(f => /\.(csv|xlsx?)$/i.test(f.name));
+        const csv = qtyFiles.find(f => /rebar/i.test(f.name)) ?? qtyFiles.find(f => /\.xlsx?$/i.test(f.name)) ?? qtyFiles[0];
         if (!sab && !csv) {
-            setError('빌더허브 폴더의 Models 안에서 .sab 파일이나 _rebar.csv 파일을 골라 주세요.');
+            setError('빌더허브 .sab(형상) 파일이나 물량 파일(_rebar.csv 또는 산출서 엑셀)을 골라 주세요.');
             return;
         }
         if (selectedDong === NEW_DONG && !csv) {
-            setError('새 동을 모델에서 추가하려면 동 이름과 층 정보가 든 _rebar.csv를 골라 주세요.');
+            setError('새 동을 모델에서 추가하려면 동 이름과 층 정보가 든 물량 파일(_rebar.csv 또는 산출서 엑셀)을 골라 주세요.');
             return;
         }
         setError('');
         setNotice('');
-        setBusy(sab ? { label: '모델 변환 중', ratio: 0 } : { label: '물량 CSV 읽는 중' });
+        setBusy(sab ? { label: '모델 변환 중', ratio: 0 } : { label: '물량 파일 읽는 중' });
         const worker = new Worker(new URL('../utils/sabWorker.ts', import.meta.url), { type: 'module' });
         worker.onmessage = async (e: MessageEvent) => {
             const msg = e.data as ({ type: 'progress'; stage?: 'csv' } & SabProgress)
@@ -391,7 +391,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                 | { type: 'error'; message: string };
             if (msg.type === 'progress') {
                 setBusy(msg.stage === 'csv'
-                    ? { label: '물량 CSV 읽는 중' }
+                    ? { label: '물량 파일 읽는 중' }
                     : { label: `모델 변환 중 (부재 ${msg.bodies.toLocaleString()}개)`, ratio: msg.ratio });
                 return;
             }
@@ -408,7 +408,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
             }
             const members = quantities?.members;
             if (quantities && members?.length === 0) {
-                setError('물량 CSV에서 철근 물량을 찾지 못했습니다.');
+                setError('물량 파일에서 철근 물량을 찾지 못했습니다.');
                 return;
             }
 
@@ -439,7 +439,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                 if (!ok) return;
             }
 
-            // 2. 물량 CSV가 있으면 동 이름·층 정보를 프로젝트 설정에 맞춘다
+            // 2. 물량 파일이 있으면 동 이름·층 정보를 프로젝트 설정에 맞춘다
             const target = quantities ? syncBuildingFromModel(quantities, csv!.name) : building;
             if (!target) {
                 setError('모델을 올릴 동이 없어 취소했습니다.');
@@ -467,7 +467,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                 setBusy(null);
             }
 
-            if (!finalMembers.length) setNotice('형상만 올렸습니다. 같은 폴더의 _rebar.csv를 올리면 실행 물량과 층 정보가 추가됩니다.');
+            if (!finalMembers.length) setNotice('형상만 올렸습니다. 같은 폴더의 _rebar.csv나 산출서 엑셀을 올리면 실행 물량과 층 정보가 추가됩니다.');
             else if (!finalBodies.length) setNotice('물량만 올렸습니다. 같은 폴더의 .sab를 올리면 3D 형상이 추가됩니다.');
 
             // 4. 새 물량이면 이 동의 실행 물량을 모델 기준으로 바꿀지 묻는다
@@ -519,7 +519,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                             <input
                                 ref={fileInputRef}
                                 type="file"
-                                accept=".sab,.csv"
+                                accept=".sab,.csv,.xlsx,.xls"
                                 multiple
                                 className="hidden"
                                 onChange={e => {
@@ -531,10 +531,10 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                             <button
                                 onClick={() => fileInputRef.current?.click()}
                                 disabled={!!busy || !selectedDong}
-                                title="Models 폴더의 .sab(형상)와 _rebar.csv(물량) - 함께 또는 따로"
+                                title="Models 폴더의 .sab(형상)와 물량 파일(_rebar.csv 또는 산출서 엑셀) - 함께 또는 따로"
                                 className="flex items-center gap-1.5 px-3 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium whitespace-nowrap hover:bg-blue-700 disabled:opacity-50"
                             >
-                                <UploadCloud size={16} /> 모델 올리기 (.sab / 물량 CSV)
+                                <UploadCloud size={16} /> 모델 올리기 (.sab / 물량 CSV·엑셀)
                             </button>
                             {model?.members?.length ? (
                                 <button
@@ -591,7 +591,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                             </p>
                             <p className="text-sm max-w-md">
                                 빌더허브 프로젝트 폴더의 <span className="font-mono text-xs bg-white px-1 rounded border">이름.rhb.Data/Models</span> 에서
-                                <span className="font-mono text-xs bg-white px-1 rounded border">.sab</span>(3D 형상)와 <span className="font-mono text-xs bg-white px-1 rounded border">_rebar.csv</span>(실행 물량·층 정보)를 올려 주세요.
+                                <span className="font-mono text-xs bg-white px-1 rounded border">.sab</span>(3D 형상)와 <span className="font-mono text-xs bg-white px-1 rounded border">_rebar.csv</span> 또는 산출서 엑셀(실행 물량·층 정보)을 올려 주세요.
                                 함께 올려도, 따로 올려도 됩니다. 변환한 모델은 이 브라우저에만 저장됩니다.
                             </p>
                         </div>

@@ -1,6 +1,8 @@
+import * as XLSX from 'xlsx';
 import { MemberClass } from '../types';
+import { classifyMember } from './floorBasis';
 
-// 빌더허브 물량 내보내기 `*_rebar.csv`를 부재(객체ID)별 실행 물량으로 묶는다.
+// 빌더허브 물량 내보내기 `*_rebar.csv`나 산출서 엑셀의 rebar 시트를 부재(객체ID)별 실행 물량으로 묶는다.
 // 한 행 = 한 부재의 철근 1종. '구성'이 철근이면 '값'은 ton, 커플러면 개수다.
 
 export interface MemberQtyItem {
@@ -57,43 +59,48 @@ function parseCsv(text: string, onRow: (cells: string[]) => void) {
     if (cell || cells.length) { cells.push(cell); onRow(cells); }
 }
 
-export function parseRebarCsv(text: string): RebarCsvResult {
-    let col: Record<string, number> | null = null;
-    const members = new Map<number, ModelMember>();
-    const floors = new Map<number, string>();
-    const buildingNames = new Map<string, number>();
-    const required = ['객체ID', '층번호', '구성', '값', '철근직경', '철근강종'];
+// 빌더허브 철근 물량 행(CSV 또는 산출서 엑셀 rebar 시트)을 부재별로 묶는다.
+// 엑셀 산출서에는 위치분류·부재구분 칸이 없어서 '부재' 글자(보, 일반슬래브, 내력벽 ...)로 수평/수직을 가린다.
+class RebarRowCollector {
+    private col: Record<string, number> | null = null;
+    private members = new Map<number, ModelMember>();
+    private floors = new Map<number, string>();
+    private buildingNames = new Map<string, number>();
 
-    parseCsv(text.replace(/^﻿/, ''), cells => {
-        if (!col) {
-            col = Object.fromEntries(cells.map((name, i) => [name.trim(), i]));
-            const missing = required.filter(k => col![k] === undefined);
-            if (missing.length) throw new Error(`빌더허브 철근 물량 CSV가 아닙니다 (없는 칸: ${missing.join(', ')})`);
+    constructor(private sourceLabel: string) {}
+
+    addRow(cells: unknown[]) {
+        if (!this.col) {
+            this.col = Object.fromEntries(cells.map((name, i) => [String(name ?? '').trim(), i]));
+            const missing = REQUIRED_COLUMNS.filter(k => this.col![k] === undefined);
+            if (missing.length) throw new Error(`빌더허브 철근 물량 ${this.sourceLabel}이(가) 아닙니다 (없는 칸: ${missing.join(', ')})`);
             return;
         }
-        const get = (k: string) => (col![k] === undefined ? '' : (cells[col![k]] ?? '').trim());
+        const col = this.col;
+        const get = (k: string) => (col[k] === undefined ? '' : String(cells[col[k]] ?? '').trim());
         const floorNo = parseInt(get('층번호'));
-        if (!isNaN(floorNo) && !floors.has(floorNo)) floors.set(floorNo, get('층이름'));
+        if (!isNaN(floorNo) && !this.floors.has(floorNo)) this.floors.set(floorNo, get('층이름'));
         const bName = get('건물명');
-        if (bName) buildingNames.set(bName, (buildingNames.get(bName) ?? 0) + 1);
+        if (bName) this.buildingNames.set(bName, (this.buildingNames.get(bName) ?? 0) + 1);
 
         const msId = parseInt(get('객체ID'));
         const value = parseFloat(get('값'));
         if (isNaN(msId) || !(value > 0)) return;
 
-        let m = members.get(msId);
+        let m = this.members.get(msId);
         if (!m) {
             const cls = get('위치분류');
+            const kind = get('부재구분') || get('부재');
             m = {
                 msId,
                 floorNo,
                 floorName: get('층이름'),
-                memberClass: cls === '수평' ? 'H' : cls === '수직' ? 'V' : undefined,
-                kind: get('부재구분') || get('부재'),
+                memberClass: cls === '수평' ? 'H' : cls === '수직' ? 'V' : classifyMember(`${kind} ${get('부재명')}`),
+                kind,
                 name: get('부재명'),
                 items: []
             };
-            members.set(msId, m);
+            this.members.set(msId, m);
         }
         const dia = get('철근직경');
         const strength = get('철근강종');
@@ -101,13 +108,42 @@ export function parseRebarCsv(text: string): RebarCsvResult {
         if (!item) { item = { dia, strength, ton: 0, ea: 0 }; m.items.push(item); }
         if (/커플러|coupler/i.test(get('구성'))) item.ea += value;
         else item.ton += value;
-    });
+    }
 
-    if (!col) throw new Error('CSV가 비어 있습니다.');
-    const buildingName = Array.from(buildingNames.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
-    return {
-        members: Array.from(members.values()),
-        buildingName,
-        floors: Array.from(floors.entries()).map(([no, name]) => ({ no, name }))
+    result(): RebarCsvResult {
+        if (!this.col) throw new Error(`${this.sourceLabel}이(가) 비어 있습니다.`);
+        const buildingName = Array.from(this.buildingNames.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
+        return {
+            members: Array.from(this.members.values()),
+            buildingName,
+            floors: Array.from(this.floors.entries()).map(([no, name]) => ({ no, name }))
+        };
+    }
+}
+
+const REQUIRED_COLUMNS = ['객체ID', '층번호', '구성', '값', '철근직경', '철근강종'];
+
+export function parseRebarCsv(text: string): RebarCsvResult {
+    const collector = new RebarRowCollector('CSV');
+    parseCsv(text.replace(/^﻿/, ''), cells => collector.addRow(cells));
+    return collector.result();
+}
+
+// 빌더허브 산출서 엑셀: 'rebar' 시트(없으면 철근 물량 칸이 있는 첫 시트)를 읽는다
+export function parseRebarXlsx(data: ArrayBuffer): RebarCsvResult {
+    const names = XLSX.read(data, { type: 'array', bookSheets: true }).SheetNames;
+    const hasColumns = (ws: XLSX.WorkSheet) => {
+        const header = (XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, range: 0 })[0] ?? []).map(v => String(v ?? '').trim());
+        return REQUIRED_COLUMNS.every(k => header.includes(k));
     };
+    const preferred = names.find(n => n.trim().toLowerCase() === 'rebar') ?? names.find(n => /철근|rebar/i.test(n));
+    let ws: XLSX.WorkSheet | undefined;
+    for (const name of [preferred, ...names].filter((n): n is string => !!n)) {
+        const candidate = XLSX.read(data, { type: 'array', sheets: name, dense: true }).Sheets[name];
+        if (candidate && hasColumns(candidate)) { ws = candidate; break; }
+    }
+    if (!ws) throw new Error(`엑셀에서 철근 물량 시트를 찾지 못했습니다 (필요한 칸: ${REQUIRED_COLUMNS.join(', ')}). 빌더허브 산출서의 rebar 시트가 있는지 확인하세요.`);
+    const collector = new RebarRowCollector('엑셀 rebar 시트');
+    for (const row of XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, raw: true, defval: '' })) collector.addRow(row);
+    return collector.result();
 }
