@@ -16,9 +16,12 @@ interface DashboardProps {
 
 const COLORS_PLANNED = '#94a3b8'; // Slate 400
 const COLORS_SHOP = '#3b82f6';    // Blue 500
+const COLORS_COUPLER_PLANNED = '#c4b5fd'; // Violet 300 (커플러 표/뱃지와 같은 보라 계열)
+const COLORS_COUPLER_SHOP = '#7c3aed';    // Violet 600
 
 export const Dashboard: React.FC<DashboardProps> = ({ currentProject, user, materials, onDeleteMaterialsOfDong }) => {
     const [chartView, setChartView] = useState<'building' | 'floor' | 'diameter'>('building');
+    const [chartUnit, setChartUnit] = useState<'rebar' | 'coupler'>('rebar');
     const [showInviteModal, setShowInviteModal] = useState(false);
 
     // Filter materials for current project only
@@ -136,9 +139,33 @@ export const Dashboard: React.FC<DashboardProps> = ({ currentProject, user, mate
             return numA - numB;
         });
 
+    // 4. 커플러 (개수 EA). 단위가 달라 철근 ton과 한 축에 그리지 않고,
+    //    단위 전환 버튼으로 같은 차트 자리에 동별/층별/직경별로 보여준다.
+    const couplerBy = (keyOf: (m: MaterialEntry) => string, order: (a: string, b: string) => number) =>
+        Object.values(couplerMaterials.reduce((acc, curr) => {
+            const key = keyOf(curr);
+            const row = acc[key] ?? (acc[key] = { name: key, Planned: 0, Shop: 0 });
+            if (curr.dataSource === 'Shop') row.Shop += curr.shopQuantity;
+            else row.Planned += curr.plannedQuantity;
+            return acc;
+        }, {} as Record<string, { name: string, Planned: number, Shop: number }>))
+            .sort((a, b) => order(a.name, b.name));
+
+    const floorValue = (s: string) => s.startsWith('B') ? -parseInt(s.replace('B', '')) : parseInt(s.replace('F', ''));
+    const couplerChartData = {
+        building: couplerBy(m => m.dong, (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })),
+        floor: couplerBy(m => m.floor, (a, b) => floorValue(a) - floorValue(b)),
+        diameter: couplerBy(m => m.diameter, (a, b) => parseInt(a.replace('D', '')) - parseInt(b.replace('D', '')))
+    };
+
+    // 커플러 데이터가 없으면 전환 버튼을 숨기고 철근만 보여준다
+    const hasCouplers = couplerMaterials.length > 0;
+    const isCouplerView = hasCouplers && chartUnit === 'coupler';
+
     // Determine current data based on view state
-    const currentChartData = chartView === 'building' ? dongData 
-                           : chartView === 'floor' ? floorData 
+    const currentChartData = isCouplerView ? couplerChartData[chartView]
+                           : chartView === 'building' ? dongData
+                           : chartView === 'floor' ? floorData
                            : diameterData;
 
     const handleCopyInvite = async () => {
@@ -397,8 +424,6 @@ ${inviteText}`);
                 </div>
             )}
 
-            <CouplerSummaryTable items={couplerMaterials} title="프로젝트 전체 커플러 직경·강종별 집계" />
-
             {projectMaterials.length > 0 ? (
                 <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
                     <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4">
@@ -407,34 +432,56 @@ ${inviteText}`);
                                 <BarChart3 size={20} className="text-slate-600"/>
                                 상세 물량 비교 분석 (Detailed Analysis)
                             </h3>
-                            <p className="text-sm text-slate-500">원설계 대비 샵 물량을 비교합니다.</p>
+                            <p className="text-sm text-slate-500">원설계 대비 샵 물량을 비교합니다.{isCouplerView ? ' 커플러는 개수(EA) 기준입니다.' : ''}</p>
                         </div>
                         
-                        <div className="flex bg-slate-100 p-1 rounded-lg">
-                            <button 
-                                onClick={() => setChartView('building')}
-                                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
-                                    chartView === 'building' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'
-                                }`}
-                            >
-                                <Building size={14} /> 동별
-                            </button>
-                            <button 
-                                onClick={() => setChartView('floor')}
-                                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
-                                    chartView === 'floor' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'
-                                }`}
-                            >
-                                <Layers size={14} /> 층별
-                            </button>
-                            <button 
-                                onClick={() => setChartView('diameter')}
-                                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
-                                    chartView === 'diameter' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'
-                                }`}
-                            >
-                                <CircleDot size={14} /> 직경별
-                            </button>
+                        <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+                            {hasCouplers && (
+                                <div className="flex bg-slate-100 p-1 rounded-lg">
+                                    <button
+                                        onClick={() => setChartUnit('rebar')}
+                                        className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${
+                                            !isCouplerView ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+                                        }`}
+                                    >
+                                        철근 (ton)
+                                    </button>
+                                    <button
+                                        onClick={() => setChartUnit('coupler')}
+                                        className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${
+                                            isCouplerView ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+                                        }`}
+                                    >
+                                        커플러 (EA)
+                                    </button>
+                                </div>
+                            )}
+                            <div className="flex bg-slate-100 p-1 rounded-lg">
+                                <button 
+                                    onClick={() => setChartView('building')}
+                                    className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
+                                        chartView === 'building' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+                                    }`}
+                                >
+                                    <Building size={14} /> 동별
+                                </button>
+                                <button 
+                                    onClick={() => setChartView('floor')}
+                                    className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
+                                        chartView === 'floor' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+                                    }`}
+                                >
+                                    <Layers size={14} /> 층별
+                                </button>
+                                <button 
+                                    onClick={() => setChartView('diameter')}
+                                    className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
+                                        chartView === 'diameter' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+                                    }`}
+                                >
+                                    <CircleDot size={14} /> 직경별
+                                </button>
+                            </div>
                         </div>
                     </div>
 
@@ -443,18 +490,24 @@ ${inviteText}`);
                             <BarChart data={currentChartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
                                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                                 <XAxis dataKey="name" stroke="#64748b" fontSize={12} tick={{ fill: '#475569' }} />
-                                <YAxis stroke="#64748b" fontSize={12} unit=" t" />
-                                <Tooltip 
+                                <YAxis stroke="#64748b" fontSize={12} unit={isCouplerView ? ' EA' : ' t'} />
+                                <Tooltip
                                     contentStyle={{ backgroundColor: '#fff', borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                                    formatter={(value: number) => [`${value} ton`]}
+                                    formatter={(value: number) => [isCouplerView ? `${Math.round(value).toLocaleString()} EA` : `${value} ton`]}
                                     cursor={{ fill: '#f1f5f9' }}
                                 />
                                 <Legend wrapperStyle={{ paddingTop: '20px' }} />
-                                <Bar dataKey="Planned" name="원설계 (Design)" fill={COLORS_PLANNED} radius={[4, 4, 0, 0]} barSize={40} animationDuration={1000} />
-                                <Bar dataKey="Shop" name="샵 (Actual)" fill={COLORS_SHOP} radius={[4, 4, 0, 0]} barSize={40} animationDuration={1000} />
+                                <Bar dataKey="Planned" name={isCouplerView ? '커플러 원설계 (Design)' : '원설계 (Design)'} fill={isCouplerView ? COLORS_COUPLER_PLANNED : COLORS_PLANNED} radius={[4, 4, 0, 0]} barSize={40} animationDuration={1000} />
+                                <Bar dataKey="Shop" name={isCouplerView ? '커플러 샵 (Actual)' : '샵 (Actual)'} fill={isCouplerView ? COLORS_COUPLER_SHOP : COLORS_SHOP} radius={[4, 4, 0, 0]} barSize={40} animationDuration={1000} />
                             </BarChart>
                         </ResponsiveContainer>
                     </div>
+
+                    {isCouplerView && (
+                        <div className="mt-6">
+                            <CouplerSummaryTable items={couplerMaterials} title="프로젝트 전체 커플러 직경·강종별 집계" />
+                        </div>
+                    )}
                 </div>
             ) : (
                 <div className="bg-slate-50 rounded-xl border-2 border-dashed border-slate-200 p-12 text-center">
