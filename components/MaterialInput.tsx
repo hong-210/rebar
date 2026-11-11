@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { MaterialEntry, Project, RebarDiameter, User, BuildingConfig, BatchUploadResult } from '../types';
+import { MaterialEntry, Project, RebarDiameter, User, BuildingConfig, BatchUploadResult, UploadMode } from '../types';
 import { Plus, Trash2, Calculator, FileSpreadsheet, UploadCloud, Building, GitBranch, ArrowRightLeft, X, Calendar, Download, BarChart3, Truck, Info, ChevronDown, ChevronRight, ChevronUp, Scale, Lock } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
@@ -25,7 +25,7 @@ interface MaterialInputProps {
     user: User;
     materials: MaterialEntry[];
     onAddMaterial: (material: MaterialEntry) => void;
-    onBatchAddMaterials: (materials: MaterialEntry[], replaceDongs?: string[]) => BatchUploadResult;
+    onBatchAddMaterials: (materials: MaterialEntry[], mode: UploadMode) => BatchUploadResult;
     onDeleteMaterial: (id: string) => void;
     onDeleteAllMaterials: (projectId: string, dataSource: 'Design' | 'Shop', dong: string) => void;
     onCreateVersion: (projectId: string, versionName: string, versionDate: string, dong: string) => void;
@@ -405,10 +405,10 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
         /수평|horizontal|슬래브|slab|beam|girder|거더|기초|footing|매트|deck|데크|(?:^|[^가-힣])(?:큰|작은)?보(?![가-힣])/i.test(text);
     const isFoundationMember = (text: string) => /기초|footing|매트|mat(?![a-z])/i.test(text);
 
-    // 읽어 둔 엑셀 물량을 반영한다. replace면 파일에 든 동들의 같은 구분 기존 물량을 비우고 새로 채운다.
-    const applyUpload = (upload: PendingUpload, replace: boolean) => {
+    // 읽어 둔 엑셀 물량을 반영한다. replace면 파일에 든 동들의 같은 구분 기존 물량을 비우고 새로 채우고, add면 기존 값에 더한다.
+    const applyUpload = (upload: PendingUpload, mode: UploadMode) => {
         setPendingUpload(null);
-        const result = onBatchAddMaterials(upload.entries, replace ? upload.dongs : undefined);
+        const result = onBatchAddMaterials(upload.entries, mode);
         setExpandedFloors(prev => {
             const next = new Set(prev);
             upload.affectedFloors.forEach(f => next.add(f));
@@ -423,9 +423,11 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                 : "\n(주의: 수평재로 인식된 행이 없어 층 변환을 하지 않았습니다. '구분' 칸에 수평/슬래브/보/기초 등이 적혀 있는지 확인하세요.)")
             : '';
         const couplerInfo = upload.couplerRowCount > 0 ? `\n(그중 커플러 ${upload.couplerRowCount}행: '구성' 칸 기준, 개수(EA)로 따로 저장)` : '';
-        const applied = replace
+        const applied = mode === 'replace'
             ? `- 교체: 기존 ${label} 물량 ${result.cleared}건 삭제 후 ${result.created}건 새로 반영`
-            : `- 신규 ${result.created}건\n- 기존 물량 덮어쓰기 ${result.replaced}건 (같은 동/층/Zone/직경/강종은 누적하지 않음)`
+            : (mode === 'add'
+                ? `- 신규 ${result.created}건\n- 기존 물량에 더하기 ${result.merged}건 (같은 동/층/Zone/직경/강종은 기존 값 + 파일 값)`
+                : `- 신규 ${result.created}건\n- 기존 물량 덮어쓰기 ${result.replaced}건 (같은 동/층/Zone/직경/강종은 누적하지 않음)`)
                 + (result.duplicatesRemoved > 0 ? `\n- 이전 업로드로 중복 저장된 물량 ${result.duplicatesRemoved}건 정리` : '');
         alert(`[${upload.dataSource} 모드] 처리 완료!${logicInfo}\n\n총 ${upload.processedCount}행 유효 데이터 -> ${upload.entries.length}개 항목으로 집계됨.${couplerInfo}\n(중량 단위: TON -> 내부 KG 변환 저장)\n\n[반영]\n${applied}\n\n[결과]\n${dongSummary}`);
     };
@@ -693,7 +695,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
 
             // 파일에 든 동에 기존 물량이 있으면 교체할지 덮어쓸지 고르게 한다
             if (upload.existingCount > 0) setPendingUpload(upload);
-            else applyUpload(upload, false);
+            else applyUpload(upload, 'overwrite');
         } else {
             const requiredKeys = isDesignMode 
                 ? `필수 컬럼: ${config.zone[0]}, ${config.weight[0]}, ${config.floor[0]}, ${config.dia[0]}`
@@ -1257,7 +1259,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                             </div>
                             <div className="space-y-2">
                                 <button
-                                    onClick={() => applyUpload(pendingUpload, true)}
+                                    onClick={() => applyUpload(pendingUpload, 'replace')}
                                     className="w-full text-left px-4 py-3 rounded-lg bg-blue-600 text-white hover:bg-blue-700"
                                 >
                                     <span className="block font-bold text-sm">교체</span>
@@ -1267,7 +1269,14 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                                     )}
                                 </button>
                                 <button
-                                    onClick={() => applyUpload(pendingUpload, false)}
+                                    onClick={() => applyUpload(pendingUpload, 'add')}
+                                    className="w-full text-left px-4 py-3 rounded-lg border border-emerald-300 text-slate-700 hover:bg-emerald-50"
+                                >
+                                    <span className="block font-bold text-sm text-emerald-700">추가</span>
+                                    <span className="block text-xs text-slate-500">기존 물량은 그대로 두고 파일 물량을 더합니다. 같은 동/층/Zone/직경/강종은 기존 값에 합산됩니다. 새로 나온 물량만 담은 파일을 올릴 때 사용하세요. 같은 파일을 두 번 올리면 두 번 더해집니다.</span>
+                                </button>
+                                <button
+                                    onClick={() => applyUpload(pendingUpload, 'overwrite')}
                                     className="w-full text-left px-4 py-3 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50"
                                 >
                                     <span className="block font-bold text-sm">덮어쓰기</span>

@@ -74,9 +74,13 @@ export interface Project {
 }
 
 // 엑셀 일괄 업로드 결과 (같은 물량은 누적하지 않고 덮어쓴다. 교체 업로드는 기존 물량을 비우고 새로 채운다)
+// 엑셀 업로드 방식: 교체(동 전체 비우고 새로) / 덮어쓰기(같은 항목은 새 값으로) / 추가(같은 항목은 기존 값에 더함)
+export type UploadMode = 'replace' | 'overwrite' | 'add';
+
 export interface BatchUploadResult {
     created: number;           // 새로 추가된 물량
     replaced: number;          // 기존 물량을 새 값으로 덮어쓴 건수
+    merged: number;            // 추가 모드에서 기존 물량에 더한 건수
     duplicatesRemoved: number; // 이전 업로드로 중복 저장되어 있다가 정리된 행
     cleared: number;           // 교체 업로드로 먼저 지운 기존 물량
 }

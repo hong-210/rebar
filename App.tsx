@@ -21,7 +21,7 @@ import { ShopDrawingBox } from './components/ShopDrawingBox';
 import { OrderManagement } from './components/OrderManagement';
 import { MemberManagement } from './components/MemberManagement';
 import { ThreeDViewer } from './components/ThreeDViewer';
-import { Project, MaterialEntry, ConcreteEntry, HistoryLog, User, Issue, IssueStatus, Order, OrderStatus, ProjectRole, Inspection, InspectionResult, ShopDrawing, BatchUploadResult } from './types';
+import { Project, MaterialEntry, ConcreteEntry, HistoryLog, User, Issue, IssueStatus, Order, OrderStatus, ProjectRole, Inspection, InspectionResult, ShopDrawing, BatchUploadResult, UploadMode } from './types';
 
 const errorMessage = (err: unknown) =>
     err && typeof err === 'object' && 'message' in err ? String((err as { message: unknown }).message) : String(err);
@@ -359,12 +359,13 @@ export default function App() {
     // 동/층/Zone/직경/강종/구분이 같은 기존 물량은 더하지 않고 새 값으로 덮어쓴다.
     // 이전 업로드로 같은 키의 행이 여러 개 쌓여 있었다면 하나만 남기고 정리한다.
     // replaceDongs를 주면(교체 업로드) 그 동들의 같은 구분(실행/SHOP) 기존 물량을 모두 비우고 파일 내용으로 새로 채운다.
-    const handleBatchAddMaterials = (entries: MaterialEntry[], replaceDongs?: string[]): BatchUploadResult => {
-        const result: BatchUploadResult = { created: 0, replaced: 0, duplicatesRemoved: 0, cleared: 0 };
+    const handleBatchAddMaterials = (entries: MaterialEntry[], mode: UploadMode): BatchUploadResult => {
+        const result: BatchUploadResult = { created: 0, replaced: 0, merged: 0, duplicatesRemoved: 0, cleared: 0 };
         if (entries.length === 0) return result;
 
         const source = entries[0].dataSource ?? 'Design';
-        const clearDongs = new Set(replaceDongs ?? []);
+        // 교체면 파일에 든 동들의 같은 구분 기존 물량을 먼저 비운다
+        const clearDongs = new Set(mode === 'replace' ? entries.map(e => e.dong) : []);
         const isCleared = (m: MaterialEntry) =>
             m.projectId === entries[0].projectId && clearDongs.has(m.dong) && (m.dataSource ?? 'Design') === source;
         const clearedIds = materials.filter(isCleared).map(m => m.id);
@@ -398,13 +399,31 @@ export default function App() {
                 result.created++;
                 return;
             }
-            // 기존 행 id를 유지하고, 다른 버전(Rev)의 실행 물량 기록은 보존한다
-            replacements.set(first.id, {
-                ...entry,
-                id: first.id,
-                plannedVersions: { ...first.plannedVersions, ...entry.plannedVersions }
-            });
-            result.replaced++;
+            if (mode === 'add') {
+                // 기존 값에 파일 값을 더한다 (현재 버전의 실행 물량 기록도 함께 더함)
+                const sum = (a?: number, b?: number) => Number(((a ?? 0) + (b ?? 0)).toFixed(2));
+                const activeVersions = entry.dataSource !== 'Shop'
+                    ? { [activeVer]: sum(first.plannedVersions?.[activeVer], entry.plannedWeight) }
+                    : {};
+                replacements.set(first.id, {
+                    ...first,
+                    plannedWeight: sum(first.plannedWeight, entry.plannedWeight),
+                    shopWeight: sum(first.shopWeight, entry.shopWeight),
+                    plannedQuantity: sum(first.plannedQuantity, entry.plannedQuantity),
+                    shopQuantity: sum(first.shopQuantity, entry.shopQuantity),
+                    plannedVersions: { ...first.plannedVersions, ...activeVersions },
+                    lastUpdated: entry.lastUpdated
+                });
+                result.merged++;
+            } else {
+                // 기존 행 id를 유지하고, 다른 버전(Rev)의 실행 물량 기록은 보존한다
+                replacements.set(first.id, {
+                    ...entry,
+                    id: first.id,
+                    plannedVersions: { ...first.plannedVersions, ...entry.plannedVersions }
+                });
+                result.replaced++;
+            }
             extras.forEach(m => removedIds.push(m.id));
             result.duplicatesRemoved += extras.length;
         });
@@ -423,9 +442,11 @@ export default function App() {
         const dongList = Array.from(affectedDongs).join(', ');
         const duplicateInfo = result.duplicatesRemoved > 0 ? `, 중복 ${result.duplicatesRemoved}건 정리` : '';
         const label = source === 'Design' ? '실행' : 'SHOP';
-        const summary = replaceDongs
+        const summary = mode === 'replace'
             ? `교체 업로드 - 기존 ${label} ${result.cleared}건 삭제 후 ${result.created}건 반영`
-            : `신규 ${result.created}건, 덮어쓰기 ${result.replaced}건${duplicateInfo}`;
+            : mode === 'add'
+                ? `추가 업로드 - 신규 ${result.created}건, 기존 물량에 더하기 ${result.merged}건${duplicateInfo}`
+                : `신규 ${result.created}건, 덮어쓰기 ${result.replaced}건${duplicateInfo}`;
         addLog(entries[0].projectId, 'IMPORT', `철근 엑셀 데이터 일괄 업로드 (${summary}) - ${dongList}`);
         return result;
     };
