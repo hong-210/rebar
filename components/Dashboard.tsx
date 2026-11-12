@@ -6,6 +6,8 @@ import { copyText } from '../utils/clipboard';
 import { TrendingUp, Package, Share2, AlertCircle, AlertTriangle, Trash2, ArrowRight, Building, CalendarClock, Timer, Layers, CircleDot, BarChart3, Key, Copy, X, Shield, Link as LinkIcon, Check, FileDown } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { CouplerSummaryTable, isCoupler } from './CouplerSummary';
+import { FloorProgressMap } from './FloorProgressMap';
+import { useNavigate } from 'react-router-dom';
 
 interface DashboardProps {
     currentProject: Project;
@@ -25,6 +27,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ currentProject, user, mate
     const [showInviteModal, setShowInviteModal] = useState(false);
 
     // Filter materials for current project only
+    const navigate = useNavigate();
     const projectMaterials = materials.filter(m => m.projectId === currentProject.id);
     // 커플러는 개수(EA)로 따로 집계하므로 ton 차트/보고서에는 철근만 쓴다
     const rebarMaterials = projectMaterials.filter(m => !isCoupler(m));
@@ -422,6 +425,14 @@ ${inviteText}`);
                         ))}
                     </div>
                 </div>
+            )}
+
+            {currentProject.buildings.length > 0 && (
+                <FloorProgressMap
+                    project={currentProject}
+                    materials={materials}
+                    onOpenDong={dong => navigate('/3d-viewer', { state: { dong } })}
+                />
             )}
 
             {projectMaterials.length > 0 ? (

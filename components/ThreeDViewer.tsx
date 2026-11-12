@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Box, UploadCloud, Trash2, Loader2, Info, X, RefreshCw, CheckCircle2 } from 'lucide-react';
 import { BatchUploadResult, BuildingConfig, MaterialEntry, MemberClass, Project, UploadMode, User } from '../types';
-import { isCoupler } from './CouplerSummary';
+import { useLocation } from 'react-router-dom';
 import type { SabBody, SabModel, SabProgress } from '../utils/sabParser';
 import { StoredModelMeta, LoadedModel, listModels, saveModelParts, loadModel, deleteModel } from '../utils/modelStorage';
 import type { ModelMember, RebarCsvResult } from '../utils/rebarCsv';
@@ -12,6 +12,10 @@ import {
     modelBodyCompareFloor, modelFloorName, isHorizontalModelType, modelBodyClass,
     buildingFromModelFloors, sameBuildingName, roofFloorsOf, floorLabel as labelFloor
 } from '../utils/floorBasis';
+import {
+    ClassFilter, FloorSplit, floorSplitsByDong, progressOf, progressColor, hasAmount, floorOrder, toTon, percent,
+    COLOR_DIM, PROGRESS_LEGEND
+} from '../utils/progress';
 
 interface ThreeDViewerProps {
     currentProject: Project;
@@ -24,56 +28,7 @@ interface ThreeDViewerProps {
 // 동 선택에서 '모델에서 새 동 추가'
 const NEW_DONG = '__new__';
 
-interface FloorProgress {
-    planned: number; // kg
-    shop: number;    // kg
-}
-
-// 한 층의 물량을 수평재 / 수직재 / 구분 없음으로 나눠 둔다
-interface FloorSplit {
-    H: FloorProgress;
-    V: FloorProgress;
-    none: FloorProgress;
-    all: FloorProgress;
-}
-
-const hasAmount = (p: FloorProgress) => p.planned > 0 || p.shop > 0;
-
-// 구분 없는 물량이 섞인 층은 수평/수직으로 나눌 수 없어 층 전체 진척을 쓴다
-const progressOf = (split: FloorSplit | undefined, cls: MemberClass): { p: FloorProgress | undefined; merged: boolean } => {
-    if (!split) return { p: undefined, merged: false };
-    return hasAmount(split.none) ? { p: split.all, merged: true } : { p: split[cls], merged: false };
-};
-
-type ClassFilter = 'all' | MemberClass;
-
 type Busy = { label: string; ratio?: number } | null;
-
-// --- 진척 색 ---
-const COLOR_NO_DATA = '#e2e8f0';    // 실행·SHOP 물량 모두 없음
-const COLOR_NOT_STARTED = '#94a3b8'; // 실행만 있음 (0%)
-const COLOR_OVER = '#ef4444';        // 실행 초과
-const COLOR_SHOP_ONLY = '#a855f7';   // 실행 없이 SHOP만 있음
-const COLOR_DIM = '#f1f5f9';         // 층을 골랐을 때 나머지 층
-const PROGRESS_STOPS = ['#fbbf24', '#a3e635', '#16a34a']; // 0% → 50% → 100%
-
-function progressColor(p: FloorProgress | undefined): string {
-    if (!p || (p.planned <= 0 && p.shop <= 0)) return COLOR_NO_DATA;
-    if (p.planned <= 0) return COLOR_SHOP_ONLY;
-    const r = p.shop / p.planned;
-    if (r <= 0) return COLOR_NOT_STARTED;
-    if (r > 1.05) return COLOR_OVER;
-    if (r >= 0.995) return PROGRESS_STOPS[2];
-    const c = new THREE.Color(PROGRESS_STOPS[0]);
-    return r < 0.5
-        ? '#' + c.lerp(new THREE.Color(PROGRESS_STOPS[1]), r / 0.5).getHexString()
-        : '#' + new THREE.Color(PROGRESS_STOPS[1]).lerp(new THREE.Color(PROGRESS_STOPS[2]), (r - 0.5) / 0.5).getHexString();
-}
-
-const floorOrder = (f: string) => (f.startsWith('B') ? -parseInt(f.slice(1)) : parseInt(f));
-const toTon = (kg: number) => (kg / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 });
-const percent = (p: FloorProgress | undefined) =>
-    p && p.planned > 0 ? `${Math.round((p.shop / p.planned) * 100)}%` : p && p.shop > 0 ? 'SHOP만' : '-';
 
 const TYPE_LABELS: Record<string, string> = {
     Slab: '슬래브', Beam: '보', Wall: '벽체', Column: '기둥', Stair: '계단', LowWall: '난간벽',
@@ -95,7 +50,10 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
     const canEdit = userRole === 'Admin' || userRole === 'Participant';
 
     const [models, setModels] = useState<StoredModelMeta[]>([]);
-    const [selectedDong, setSelectedDong] = useState(currentProject.buildings[0]?.name ?? NEW_DONG);
+    const requestedDong = (useLocation().state as { dong?: string } | null)?.dong;
+    const [selectedDong, setSelectedDong] = useState(
+        currentProject.buildings.find(b => b.name === requestedDong)?.name ?? currentProject.buildings[0]?.name ?? NEW_DONG
+    );
     const [model, setModel] = useState<LoadedModel | null>(null);
     const [busy, setBusy] = useState<Busy>(null);
     const [error, setError] = useState('');
@@ -130,22 +88,10 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
     }, [currentProject.id, selectedDong]);
 
     // 층별·수평/수직별 실행·SHOP 철근 물량 (커플러 제외, 업로드할 때 이미 SHOP 층 기준으로 맞춰져 있다)
-    const progressByFloor = useMemo(() => {
-        const map = new Map<string, FloorSplit>();
-        const empty = () => ({ planned: 0, shop: 0 });
-        materials
-            .filter(m => m.projectId === currentProject.id && m.dong === selectedDong && !isCoupler(m))
-            .forEach(m => {
-                const split = map.get(m.floor) ?? { H: empty(), V: empty(), none: empty(), all: empty() };
-                const isShop = (m.dataSource ?? 'Design') === 'Shop';
-                const kg = (isShop ? m.shopWeight : m.plannedWeight) || 0;
-                for (const p of [split[m.memberClass ?? 'none'], split.all]) {
-                    if (isShop) p.shop += kg; else p.planned += kg;
-                }
-                map.set(m.floor, split);
-            });
-        return map;
-    }, [materials, currentProject.id, selectedDong]);
+    const progressByFloor = useMemo(
+        () => floorSplitsByDong(materials, currentProject.id).get(selectedDong) ?? new Map<string, FloorSplit>(),
+        [materials, currentProject.id, selectedDong]
+    );
 
     // 부재마다 비교할 층 (실행 n형 → SHOP 기준)과 수평/수직
     const bodyFloors = useMemo(() => {
@@ -613,14 +559,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
 
                     {!!model?.bodies.length && (
                         <div className="absolute left-3 bottom-3 bg-white/90 rounded-lg shadow-sm border border-slate-200 px-3 py-2 text-xs text-slate-600 space-y-1">
-                            {[
-                                [COLOR_NOT_STARTED, '실행만 (0%)'],
-                                [PROGRESS_STOPS[0], '진행 중'],
-                                [PROGRESS_STOPS[2], '완료 (100%)'],
-                                [COLOR_OVER, '실행 초과 (105%↑)'],
-                                [COLOR_SHOP_ONLY, 'SHOP만 있음'],
-                                [COLOR_NO_DATA, '물량 없음'],
-                            ].map(([c, label]) => (
+                            {PROGRESS_LEGEND.map(([c, label]) => (
                                 <div key={label} className="flex items-center gap-2">
                                     <span className="w-3 h-3 rounded-sm border border-slate-300" style={{ background: c }} />
                                     {label}
