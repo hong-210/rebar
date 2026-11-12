@@ -35,8 +35,12 @@ const TYPE_LABELS: Record<string, string> = {
     RWall: '옹벽', Pit: 'PIT', IsoFoot: '독립기초'
 };
 
+// 선택한 부재 색 (진척 색과 겹치지 않는 파랑) + 외곽선
+const COLOR_PICKED = '#2563eb';
+
 // 변환한 모델을 화면에 그리는 three.js 장면
 interface Scene3D {
+    scene: THREE.Scene;
     renderer: THREE.WebGLRenderer;
     camera: THREE.PerspectiveCamera;
     controls: OrbitControls;
@@ -177,7 +181,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
         loop();
 
         sceneRef.current = {
-            renderer, camera, controls, mesh, colors,
+            scene, renderer, camera, controls, mesh, colors,
             dispose: () => {
                 cancelAnimationFrame(frame);
                 observer.disconnect();
@@ -213,8 +217,52 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                 arr[v * 3] = c.r; arr[v * 3 + 1] = c.g; arr[v * 3 + 2] = c.b;
             }
         });
+        // 선택한 부재는 진척 색 대신 파랑으로 (층·수평/수직 강조와 관계없이 항상 보이게)
+        if (picked) {
+            const c = new THREE.Color(COLOR_PICKED);
+            for (const b of model.bodies) {
+                if (b.msId !== picked.msId) continue;
+                for (let v = b.v0; v < b.v0 + b.vn; v++) {
+                    arr[v * 3] = c.r; arr[v * 3 + 1] = c.g; arr[v * 3 + 2] = c.b;
+                }
+            }
+        }
         s.colors.needsUpdate = true;
-    }, [model, bodyFloors, bodyClasses, progressByFloor, selectedFloor, classFilter]);
+    }, [model, bodyFloors, bodyClasses, progressByFloor, selectedFloor, classFilter, picked]);
+
+    // 선택한 부재 외곽선 (다른 부재에 가려져도 보이게 깊이 검사 없이 그린다)
+    useEffect(() => {
+        const s = sceneRef.current;
+        if (!s || !model || !picked) return;
+        const src = model.positions;
+        const lines: THREE.LineSegments[] = [];
+        for (const b of model.bodies) {
+            if (b.msId !== picked.msId) continue;
+            const g = new THREE.BufferGeometry();
+            g.setAttribute('position', new THREE.BufferAttribute(src.slice(b.v0 * 3, (b.v0 + b.vn) * 3), 3));
+            const edges = new THREE.EdgesGeometry(g, 20);
+            g.dispose();
+            const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x1e3a8a, depthTest: false, transparent: true, opacity: 0.9 }));
+            line.renderOrder = 1;
+            s.scene.add(line);
+            lines.push(line);
+        }
+        return () => {
+            for (const line of lines) {
+                s.scene.remove(line);
+                line.geometry.dispose();
+                (line.material as THREE.Material).dispose();
+            }
+        };
+    }, [model, picked]);
+
+    // Esc로 부재 선택 해제
+    useEffect(() => {
+        if (!picked) return;
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setPicked(null); };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [picked]);
 
     // 부재 클릭 → 정보 표시 (드래그로 돌린 경우는 무시)
     useEffect(() => {
@@ -445,7 +493,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                     <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
                         <Box className="text-blue-600" /> 3D 진척 모델
                     </h2>
-                    <p className="text-slate-500 text-sm">빌더허브 실행 모델을 올리면 층별 SHOP 물량 진척률을 색으로 보여줍니다. 슬래브·보는 SHOP 기준 층(한 층 위)으로 비교합니다.</p>
+                    <p className="text-slate-500 text-sm">빌더허브 실행 모델을 올리면 층별 SHOP 물량 진척률을 색으로 보여줍니다. 슬래브·보는 SHOP 기준 층(한 층 위)으로 비교합니다. 부재를 누르면 파랑으로 표시하고 물량 정보를 보여줍니다 (Esc로 해제).</p>
                 </div>
                 <div className="flex items-center gap-2">
                     <select
@@ -565,6 +613,10 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                                     {label}
                                 </div>
                             ))}
+                            <div className="flex items-center gap-2">
+                                <span className="w-3 h-3 rounded-sm border border-blue-900" style={{ background: COLOR_PICKED }} />
+                                선택 부재
+                            </div>
                         </div>
                     )}
 
@@ -594,10 +646,24 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                                 if (!member) return model?.members ? <p className="mt-2 text-[11px] text-slate-400">이 부재에는 실행 철근 물량이 없습니다.</p> : null;
                                 const ton = member.items.reduce((a, it) => a + it.ton, 0);
                                 const ea = member.items.reduce((a, it) => a + it.ea, 0);
+                                // 이 부재가 비교 층(같은 수평/수직) 실행 물량에서 차지하는 비율
+                                const floorPlanned = pickedFloor
+                                    ? progressOf(progressByFloor.get(pickedFloor), modelBodyClass(picked.type)).p?.planned ?? 0
+                                    : 0;
                                 return (
                                     <div className="mt-2 pt-2 border-t border-slate-100 text-xs">
                                         <p className="font-bold text-slate-700">{member.name || member.kind}</p>
-                                        <p className="text-slate-500 mb-1">실행 철근 {ton.toFixed(3)} t{ea > 0 ? ` · 커플러 ${ea}개` : ''}</p>
+                                        <p className="text-slate-500">
+                                            {[member.kind !== member.name ? member.kind : '', member.floorName ? `모델 층 ${member.floorName}` : ''].filter(Boolean).join(' · ')}
+                                        </p>
+                                        <p className="text-slate-700 mt-1">
+                                            실행 철근 <span className="font-bold">{ton.toFixed(3)} t</span>{ea > 0 ? ` · 커플러 ${ea}개` : ''}
+                                        </p>
+                                        {floorPlanned > 0 && (
+                                            <p className="text-slate-500 mb-1">
+                                                {pickedFloor && floorLabel(pickedFloor)} {modelBodyClass(picked.type) === 'H' ? '수평재' : '수직재'} 실행 물량의 {((ton * 1000 / floorPlanned) * 100).toFixed(1)}%
+                                            </p>
+                                        )}
                                         <table className="w-full text-slate-600">
                                             <tbody>
                                                 {member.items.map(it => (
