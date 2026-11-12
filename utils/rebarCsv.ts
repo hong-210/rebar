@@ -30,7 +30,7 @@ export interface RebarCsvResult {
 }
 
 // 따옴표 안의 쉼표·줄바꿈을 처리하는 CSV 파서
-function parseCsv(text: string, onRow: (cells: string[]) => void) {
+export function parseCsv(text: string, onRow: (cells: string[]) => void) {
     let cells: string[] = [];
     let cell = '';
     let quoted = false;

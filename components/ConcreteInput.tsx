@@ -3,6 +3,7 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { ConcreteEntry, Project, User } from '../types';
 import { Plus, Trash2, Calculator, FileSpreadsheet, UploadCloud, Building, ChevronDown, ChevronUp, Component, Droplets, HardHat, Download, BarChart3 } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import { normalizeConcreteType } from '../utils/concreteModel';
 
 interface ConcreteInputProps {
     currentProject: Project;
@@ -16,34 +17,6 @@ interface ConcreteInputProps {
 
 // 1. 표준 부재 목록 정의 (Standard Concrete Types)
 const STANDARD_CONCRETE_TYPES = ['피트', '기초', '슬래브', '기둥', '보', '벽', '계단'];
-
-// 2. 부재 매핑 로직 (Normalizer)
-const normalizeConcreteType = (raw: string): string => {
-    if (!raw) return '';
-    const lower = raw.trim().toLowerCase();
-
-    // Specific to General Mapping Priority
-    if (lower.includes('계단') || lower.includes('stair') || lower.includes('step')) return '계단';
-    if (lower.includes('피트') || lower.includes('pit')) return '피트';
-    
-    // Slab (Includes '매트', '바닥' -> '슬래브')
-    if (lower.includes('슬래브') || lower.includes('slab') || lower.includes('slb') || lower.includes('바닥') || lower.includes('매트')) return '슬래브';
-    
-    // Foundation (Includes '줄기초' -> '기초')
-    if (lower.includes('기초') || lower.includes('foundation') || lower.includes('footing')) return '기초';
-
-    // Column
-    if (lower.includes('기둥') || lower.includes('column') || lower.includes('col') || lower.includes('piloti')) return '기둥';
-    
-    // Beam
-    if (lower.includes('girder') || lower.includes('beam') || lower.endsWith('보') || lower.startsWith('보 ') || lower === '보') return '보';
-
-    // Wall (Includes '옹벽', '난간' -> '벽')
-    if (lower.includes('벽') || lower.includes('wall') || lower.includes('parapet') || lower.includes('난간') || lower.includes('옹벽')) return '벽';
-
-    // Default: Empty string if unknown/unspecified
-    return '';
-};
 
 // Data Aggregation Helper
 const aggregateByStrength = (items: ConcreteEntry[]) => {

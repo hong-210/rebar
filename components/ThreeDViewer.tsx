@@ -2,12 +2,13 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Box, UploadCloud, Trash2, Loader2, Info, X, RefreshCw, CheckCircle2 } from 'lucide-react';
-import { BatchUploadResult, BuildingConfig, MaterialEntry, MemberClass, Project, UploadMode, User } from '../types';
+import { BatchUploadResult, BuildingConfig, ConcreteEntry, MaterialEntry, MemberClass, Project, UploadMode, User } from '../types';
 import { useLocation } from 'react-router-dom';
 import type { SabBody, SabModel, SabProgress } from '../utils/sabParser';
 import { StoredModelMeta, LoadedModel, listModels, saveModelParts, loadModel, deleteModel } from '../utils/modelStorage';
 import type { ModelMember, RebarCsvResult } from '../utils/rebarCsv';
 import { buildDesignEntries } from '../utils/modelQuantities';
+import { ConcCsvResult, ModelConcMember, buildConcreteEntries, memberVolume } from '../utils/concreteModel';
 import {
     modelBodyCompareFloor, modelFloorName, isHorizontalModelType, modelBodyClass,
     buildingFromModelFloors, sameBuildingName, roofFloorsOf, floorLabel as labelFloor
@@ -23,7 +24,12 @@ interface ThreeDViewerProps {
     materials: MaterialEntry[];
     onBatchAddMaterials: (entries: MaterialEntry[], mode: UploadMode) => BatchUploadResult;
     onUpdateProject: (project: Project) => void;
+    concretes: ConcreteEntry[];
+    onReplaceConcreteDesign: (projectId: string, dong: string, entries: ConcreteEntry[]) => void;
 }
+
+// 물량 파일에서 동 설정에 쓰는 정보 (철근·콘크리트 공통)
+type ModelBuildingInfo = { buildingName: string; floors: { no: number; name: string }[] };
 
 // 동 선택에서 '모델에서 새 동 추가'
 const NEW_DONG = '__new__';
@@ -49,7 +55,7 @@ interface Scene3D {
     dispose: () => void;
 }
 
-export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user, materials, onBatchAddMaterials, onUpdateProject }) => {
+export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user, materials, onBatchAddMaterials, onUpdateProject, concretes, onReplaceConcreteDesign }) => {
     const userRole = currentProject.members.find(m => m.userId === user.email)?.role || 'Guest';
     const canEdit = userRole === 'Admin' || userRole === 'Participant';
 
@@ -103,6 +109,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
         return model.bodies.map(b => modelBodyCompareFloor(b.type, b.floor, building));
     }, [model, building]);
     const memberById = useMemo(() => new Map((model?.members ?? []).map(m => [m.msId, m])), [model]);
+    const concById = useMemo(() => new Map((model?.concMembers ?? []).map(m => [m.msId, m])), [model]);
     const bodyClasses = useMemo(() => model?.bodies.map(b => modelBodyClass(b.type)) ?? [], [model]);
 
     const floorList = useMemo(() => {
@@ -323,17 +330,42 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
         setNotice(`${building.name} 실행 물량을 모델 기준으로 반영했습니다: 철근 ${r.ton.toFixed(1)} t, 커플러 ${Math.round(r.ea).toLocaleString()}개`);
     };
 
+    // 모델의 부재별 체적으로 이 동의 콘크리트 실행 물량을 교체한다 (확인 후). 층 규칙은 철근과 같다
+    const applyModelConcrete = (members: ModelConcMember[], building: BuildingConfig | undefined) => {
+        if (!building) return;
+        const r = buildConcreteEntries(members, building, currentProject.id);
+        if (r.entries.length === 0) {
+            setError('모델 콘크리트 물량에서 반영할 체적을 찾지 못했습니다. 기준 설정의 층수를 확인하세요.');
+            return;
+        }
+        const existing = concretes.filter(c =>
+            c.projectId === currentProject.id && c.dong === building.name && c.dataSource === 'Design'
+        ).length;
+        const skippedInfo = r.skipped.length
+            ? `\n\n[반영하지 않는 체적]\n${r.skipped.map(s => `- ${s.reason}: ${s.volume.toFixed(2)} m³`).join('\n')}`
+            : '';
+        const ok = confirm(
+            `${building.name} 콘크리트 실행 물량을 모델 체적으로 교체할까요?\n\n` +
+            `- 콘크리트 ${r.volume.toFixed(1)} m³ (그중 수평재 ${r.shiftedVolume.toFixed(1)} m³는 철근과 같이 한 층 위 기준으로)\n` +
+            `- 기존 ${building.name} 콘크리트 실행 물량 ${existing}건은 삭제됩니다. (시공 물량은 그대로)` +
+            skippedInfo
+        );
+        if (!ok) return;
+        onReplaceConcreteDesign(currentProject.id, building.name, r.entries);
+        setNotice(prev => [prev, `${building.name} 콘크리트 실행 물량을 모델 기준으로 반영했습니다: ${r.volume.toFixed(1)} m³`].filter(Boolean).join(' / '));
+    };
+
     // 모델 물량(CSV·산출서 엑셀)의 동 이름으로 올릴 동을 정한다. 선택한 동이 있으면 그 동, '새 동 추가'면 이름이 같은 동이나 새 동
-    const resolveTarget = (info: RebarCsvResult | undefined, fileName: string) => {
+    const resolveTarget = (info: ModelBuildingInfo | undefined, fileName: string) => {
         const selected = currentProject.buildings.find(b => b.name === selectedDong);
-        const modelName = info?.buildingName || fileName.replace(/\.(sab|csv)$/i, '').replace(/_rebar$/i, '').split('_').pop() || fileName;
+        const modelName = info?.buildingName || fileName.replace(/\.(sab|csv|xlsx?)$/i, '').replace(/_(rebar|conc)$/i, '').split('_').pop() || fileName;
         const existing = selected ?? currentProject.buildings.find(b => sameBuildingName(b.name, modelName));
         return { selected, modelName, existing, name: existing?.name ?? modelName };
     };
 
     // 모델의 동 이름·층 정보를 프로젝트 설정과 맞춘다 (다르면 확인 후 갱신, 없으면 추가).
     // 반영할 동 설정을 돌려주고, 대상 동이 없는데 추가를 취소하면 undefined
-    const syncBuildingFromModel = (info: RebarCsvResult, sourceFile: string): BuildingConfig | undefined => {
+    const syncBuildingFromModel = (info: ModelBuildingInfo, sourceFile: string): BuildingConfig | undefined => {
         const { selected, modelName, existing: target } = resolveTarget(info, sourceFile);
         const fromModel = buildingFromModelFloors(target?.name ?? modelName, info.floors, sourceFile);
         const describe = (b: BuildingConfig) =>
@@ -366,13 +398,16 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
         if (!selectedDong) return;
         const sab = files.find(f => /\.sab$/i.test(f.name));
         const qtyFiles = files.filter(f => /\.(csv|xlsx?)$/i.test(f.name));
-        const csv = qtyFiles.find(f => /rebar/i.test(f.name)) ?? qtyFiles.find(f => /\.xlsx?$/i.test(f.name)) ?? qtyFiles[0];
-        if (!sab && !csv) {
-            setError('빌더허브 .sab(형상) 파일이나 물량 파일(_rebar.csv 또는 산출서 엑셀)을 골라 주세요.');
+        // _conc.csv는 콘크리트, 나머지 CSV·엑셀은 철근 (엑셀은 conc 시트가 있으면 콘크리트도 읽는다)
+        const conc = qtyFiles.find(f => /\.csv$/i.test(f.name) && /conc/i.test(f.name));
+        const rebarFiles = qtyFiles.filter(f => f !== conc);
+        const csv = rebarFiles.find(f => /rebar/i.test(f.name)) ?? rebarFiles.find(f => /\.xlsx?$/i.test(f.name)) ?? rebarFiles[0];
+        if (!sab && !csv && !conc) {
+            setError('빌더허브 .sab(형상) 파일이나 물량 파일(_rebar.csv, _conc.csv 또는 산출서 엑셀)을 골라 주세요.');
             return;
         }
-        if (selectedDong === NEW_DONG && !csv) {
-            setError('새 동을 모델에서 추가하려면 동 이름과 층 정보가 든 물량 파일(_rebar.csv 또는 산출서 엑셀)을 골라 주세요.');
+        if (selectedDong === NEW_DONG && !csv && !conc) {
+            setError('새 동을 모델에서 추가하려면 동 이름과 층 정보가 든 물량 파일(_rebar.csv, _conc.csv 또는 산출서 엑셀)을 골라 주세요.');
             return;
         }
         setError('');
@@ -381,7 +416,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
         const worker = new Worker(new URL('../utils/sabWorker.ts', import.meta.url), { type: 'module' });
         worker.onmessage = async (e: MessageEvent) => {
             const msg = e.data as ({ type: 'progress'; stage?: 'csv' } & SabProgress)
-                | { type: 'done'; model?: SabModel; quantities?: RebarCsvResult }
+                | { type: 'done'; model?: SabModel; quantities?: RebarCsvResult; concrete?: ConcCsvResult }
                 | { type: 'error'; message: string };
             if (msg.type === 'progress') {
                 setBusy(msg.stage === 'csv'
@@ -395,7 +430,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                 setError(`읽기 실패: ${msg.message}`);
                 return;
             }
-            const { model: sabModel, quantities } = msg;
+            const { model: sabModel, quantities, concrete } = msg;
             if (sabModel && sabModel.bodies.length === 0) {
                 setError('파일에서 부재를 찾지 못했습니다. 빌더허브 모델의 .sab 파일인지 확인하세요.');
                 return;
@@ -405,14 +440,23 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                 setError('물량 파일에서 철근 물량을 찾지 못했습니다.');
                 return;
             }
+            const concMembers = concrete?.members.length ? concrete.members : undefined;
+            if (conc && !concMembers) {
+                setError('콘크리트 물량 파일에서 체적을 찾지 못했습니다.');
+                return;
+            }
+            const concFile = conc ?? (concMembers ? csv : undefined); // 엑셀 conc 시트면 엑셀 파일 이름
+            const info: ModelBuildingInfo | undefined = quantities ?? concrete;
+            const infoFile = csv ?? conc;
 
             // 1. 이미 올린 정보를 바꾸는지, 형상과 물량이 같은 모델인지 확인한다
-            const dest = resolveTarget(quantities, (csv ?? sab)!.name);
+            const dest = resolveTarget(info, (csv ?? conc ?? sab)!.name);
             const destMeta = models.find(m => m.dong === dest.name);
             const stored = destMeta ? await loadModel(currentProject.id, dest.name).catch(() => null) : null;
             const replaced = [
                 sab && destMeta?.fileName ? `- 모델 형상: ${destMeta.fileName} → ${sab.name}` : '',
-                csv && destMeta?.csvFileName ? `- 모델 물량: ${destMeta.csvFileName} → ${csv.name}` : '',
+                csv && destMeta?.csvFileName ? `- 철근 물량: ${destMeta.csvFileName} → ${csv.name}` : '',
+                concFile && destMeta?.concFileName ? `- 콘크리트 물량: ${destMeta.concFileName} → ${concFile.name}` : '',
             ].filter(Boolean);
             const finalBodies = sabModel?.bodies ?? stored?.bodies ?? [];
             const finalMembers = members ?? stored?.members ?? [];
@@ -434,7 +478,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
             }
 
             // 2. 물량 파일이 있으면 동 이름·층 정보를 프로젝트 설정에 맞춘다
-            const target = quantities ? syncBuildingFromModel(quantities, csv!.name) : building;
+            const target = info && infoFile ? syncBuildingFromModel(info, infoFile.name) : building;
             if (!target) {
                 setError('모델을 올릴 동이 없어 취소했습니다.');
                 return;
@@ -446,13 +490,15 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                 await saveModelParts(currentProject.id, target.name, {
                     sab: sabModel && sab ? { fileName: sab.name, model: sabModel } : undefined,
                     csv: members && csv ? { fileName: csv.name, members } : undefined,
+                    conc: concMembers && concFile ? { fileName: concFile.name, members: concMembers } : undefined,
                 });
                 await refreshModels();
                 if (target.name !== selectedDong) setSelectedDong(target.name);
                 else setModel({
                     bodies: finalBodies,
                     positions: sabModel?.positions ?? stored?.positions ?? new Float32Array(0),
-                    members: finalMembers.length ? finalMembers : undefined
+                    members: finalMembers.length ? finalMembers : undefined,
+                    concMembers: concMembers ?? stored?.concMembers
                 });
             } catch (err) {
                 setError(`저장 실패: ${err instanceof Error ? err.message : String(err)}`);
@@ -461,18 +507,19 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                 setBusy(null);
             }
 
-            if (!finalMembers.length) setNotice('형상만 올렸습니다. 같은 폴더의 _rebar.csv나 산출서 엑셀을 올리면 실행 물량과 층 정보가 추가됩니다.');
+            if (!finalMembers.length && !concMembers) setNotice('형상만 올렸습니다. 같은 폴더의 _rebar.csv나 산출서 엑셀을 올리면 실행 물량과 층 정보가 추가됩니다.');
             else if (!finalBodies.length) setNotice('물량만 올렸습니다. 같은 폴더의 .sab를 올리면 3D 형상이 추가됩니다.');
 
             // 4. 새 물량이면 이 동의 실행 물량을 모델 기준으로 바꿀지 묻는다
             if (members?.length) applyModelQuantities(members, target);
+            if (concMembers) applyModelConcrete(concMembers, target);
         };
         worker.onerror = e => {
             worker.terminate();
             setBusy(null);
             setError(`읽기 실패: ${e.message}`);
         };
-        worker.postMessage({ sab, csv });
+        worker.postMessage({ sab, csv, conc });
     };
 
     const handleDelete = async () => {
@@ -525,16 +572,19 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                             <button
                                 onClick={() => fileInputRef.current?.click()}
                                 disabled={!!busy || !selectedDong}
-                                title="Models 폴더의 .sab(형상)와 물량 파일(_rebar.csv 또는 산출서 엑셀) - 함께 또는 따로"
+                                title="Models 폴더의 .sab(형상)와 물량 파일(_rebar.csv, _conc.csv 또는 산출서 엑셀) - 함께 또는 따로"
                                 className="flex items-center gap-1.5 px-3 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium whitespace-nowrap hover:bg-blue-700 disabled:opacity-50"
                             >
                                 <UploadCloud size={16} /> 모델 올리기 (.sab / 물량 CSV·엑셀)
                             </button>
-                            {model?.members?.length ? (
+                            {model?.members?.length || model?.concMembers?.length ? (
                                 <button
-                                    onClick={() => applyModelQuantities(model.members!, building)}
+                                    onClick={() => {
+                                        if (model.members?.length) applyModelQuantities(model.members, building);
+                                        if (model.concMembers?.length) applyModelConcrete(model.concMembers, building);
+                                    }}
                                     disabled={!!busy}
-                                    title="저장된 모델 물량으로 이 동의 실행 물량을 다시 반영"
+                                    title="저장된 모델 물량으로 이 동의 철근·콘크리트 실행 물량을 다시 반영"
                                     className="flex items-center gap-1.5 px-3 py-2 border border-slate-300 text-slate-700 rounded-lg text-sm font-medium whitespace-nowrap hover:bg-slate-50 disabled:opacity-50"
                                 >
                                     <RefreshCw size={14} /> 실행 물량 반영
@@ -585,7 +635,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                             </p>
                             <p className="text-sm max-w-md">
                                 빌더허브 프로젝트 폴더의 <span className="font-mono text-xs bg-white px-1 rounded border">이름.rhb.Data/Models</span> 에서
-                                <span className="font-mono text-xs bg-white px-1 rounded border">.sab</span>(3D 형상)와 <span className="font-mono text-xs bg-white px-1 rounded border">_rebar.csv</span> 또는 산출서 엑셀(실행 물량·층 정보)을 올려 주세요.
+                                <span className="font-mono text-xs bg-white px-1 rounded border">.sab</span>(3D 형상)와 <span className="font-mono text-xs bg-white px-1 rounded border">_rebar.csv</span>·<span className="font-mono text-xs bg-white px-1 rounded border">_conc.csv</span> 또는 산출서 엑셀(철근·콘크리트 실행 물량, 층 정보)을 올려 주세요.
                                 함께 올려도, 따로 올려도 됩니다. 변환한 모델은 이 브라우저에만 저장됩니다.
                             </p>
                         </div>
@@ -642,6 +692,16 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                                 <dt>부재 ID</dt><dd>{picked.msId}</dd>
                             </dl>
                             {(() => {
+                                const cm = concById.get(picked.msId);
+                                if (!cm) return null;
+                                return (
+                                    <p className="mt-2 pt-2 border-t border-slate-100 text-xs text-slate-700">
+                                        콘크리트 <span className="font-bold">{memberVolume(cm).toFixed(3)} m³</span>
+                                        <span className="text-slate-500"> ({cm.items.map(it => `${it.strength}${/^\d+$/.test(it.strength) ? 'MPa' : ''}`).join(', ')})</span>
+                                    </p>
+                                );
+                            })()}
+                            {(() => {
                                 const member = memberById.get(picked.msId);
                                 if (!member) return model?.members ? <p className="mt-2 text-[11px] text-slate-400">이 부재에는 실행 철근 물량이 없습니다.</p> : null;
                                 const ton = member.items.reduce((a, it) => a + it.ton, 0);
@@ -694,7 +754,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                         {storedModel && (
                             <p className="text-[11px] text-slate-400 mt-2 flex items-start gap-1">
                                 <Info size={12} className="mt-0.5 shrink-0" />
-                                형상 {storedModel.fileName ? `${storedModel.fileName} (부재 ${storedModel.bodyCount.toLocaleString()}개, ${(storedModel.storedBytes / 1e6).toFixed(1)} MB)` : '없음'} · 물량 {storedModel.csvFileName ?? '없음'} · {new Date(storedModel.uploadedAt).toLocaleDateString()}
+                                형상 {storedModel.fileName ? `${storedModel.fileName} (부재 ${storedModel.bodyCount.toLocaleString()}개, ${(storedModel.storedBytes / 1e6).toFixed(1)} MB)` : '없음'} · 철근 {storedModel.csvFileName ?? '없음'} · 콘크리트 {storedModel.concFileName ?? '없음'} · {new Date(storedModel.uploadedAt).toLocaleDateString()}
                             </p>
                         )}
                     </div>

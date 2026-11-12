@@ -1,5 +1,6 @@
 import type { SabBody, SabModel } from './sabParser';
 import type { ModelMember } from './rebarCsv';
+import type { ModelConcMember } from './concreteModel';
 
 // 변환한 3D 모델은 동마다 이 브라우저의 IndexedDB에 저장한다 (서버 연동 전까지 공유되지 않음).
 // 목록은 가벼운 meta 저장소에서 읽고, 형상(꼭짓점)은 gzip으로 압축해 data 저장소에 따로 둔다.
@@ -23,18 +24,23 @@ export interface StoredModelMeta {
     csvFileName?: string;
     designTon?: number;
     couplerEa?: number;
+    // 콘크리트 물량(_conc.csv 또는 산출서 conc 시트)을 올렸을 때 (부재별 실행 체적)
+    concFileName?: string;
+    concVolume?: number;
 }
 
 interface StoredModelData {
     bodies: SabBody[];
     positions?: Blob; // gzip 압축된 Float32Array (형상이 없으면 비어 있다)
     members?: ModelMember[];
+    concMembers?: ModelConcMember[];
 }
 
 export interface LoadedModel {
     bodies: SabBody[];
     positions: Float32Array;
     members?: ModelMember[];
+    concMembers?: ModelConcMember[];
 }
 
 const modelKey = (projectId: string, dong: string) => `${projectId}|${dong}`;
@@ -88,7 +94,9 @@ export async function listModels(projectId: string): Promise<StoredModelMeta[]> 
 // 형상(sab)과 물량(csv) 중 올린 것만 바꿔 저장한다
 export async function saveModelParts(
     projectId: string, dong: string,
-    parts: { sab?: { fileName: string; model: SabModel }; csv?: { fileName: string; members: ModelMember[] } }
+    parts: { sab?: { fileName: string; model: SabModel }; csv?: { fileName: string; members: ModelMember[] };
+        conc?: { fileName: string; members: ModelConcMember[] };
+    }
 ): Promise<StoredModelMeta> {
     const key = modelKey(projectId, dong);
     const [oldMeta, oldData] = await Promise.all([
@@ -119,6 +127,13 @@ export async function saveModelParts(
             couplerEa: members.reduce((a, m) => a + m.items.reduce((b, it) => b + it.ea, 0), 0),
         });
     }
+    if (parts.conc) {
+        data.concMembers = parts.conc.members;
+        Object.assign(meta, {
+            concFileName: parts.conc.fileName,
+            concVolume: parts.conc.members.reduce((a, m) => a + m.items.reduce((b, it) => b + it.volume, 0), 0),
+        });
+    }
     await run([META, DATA], 'readwrite', tx => {
         tx.objectStore(META).put(meta);
         tx.objectStore(DATA).put(data, key);
@@ -132,7 +147,8 @@ export async function loadModel(projectId: string, dong: string): Promise<Loaded
     return {
         bodies: data.bodies,
         positions: data.positions ? await decompress(data.positions) : new Float32Array(0),
-        members: data.members
+        members: data.members,
+        concMembers: data.concMembers
     };
 }
 

@@ -555,6 +555,16 @@ export default function App() {
         addLog(entries[0].projectId, 'IMPORT', `콘크리트 일괄 업로드 (신규: ${createdCount}, 병합: ${updatedCount})`);
     };
 
+    // 모델 체적으로 한 동의 콘크리트 실행 물량을 통째로 바꾼다 (시공 물량은 그대로)
+    const handleReplaceConcreteDesign = (projectId: string, dong: string, entries: ConcreteEntry[]) => {
+        const removed = concretes.filter(c => c.projectId === projectId && c.dong === dong && c.dataSource === 'Design');
+        const removedIds = new Set(removed.map(c => c.id));
+        setConcretes([...concretes.filter(c => !removedIds.has(c.id)), ...entries]);
+        if (removed.length) persist(concretesTable.removeMany([...removedIds]));
+        persist(concretesTable.upsert(entries));
+        addLog(projectId, 'IMPORT', `${dong} 콘크리트 실행 물량 모델 기준 교체 (삭제 ${removed.length}, 추가 ${entries.length})`);
+    };
+
     const handleDeleteConcrete = (id: string) => {
         setConcretes(concretes.filter(c => c.id !== id));
         persist(concretesTable.remove(id));
@@ -946,7 +956,7 @@ export default function App() {
                         />
                         <Route path="/history" element={<HistoryLogViewer logs={logs.filter(l => l.projectId === currentProject.id)} />} />
                         
-                        <Route path="/3d-viewer" element={<Suspense fallback={<div className="p-8 text-slate-500">3D 화면 불러오는 중...</div>}><ThreeDViewer currentProject={currentProject} user={currentUser} materials={materials} onBatchAddMaterials={handleBatchAddMaterials} onUpdateProject={handleUpdateProject} /></Suspense>} />
+                        <Route path="/3d-viewer" element={<Suspense fallback={<div className="p-8 text-slate-500">3D 화면 불러오는 중...</div>}><ThreeDViewer currentProject={currentProject} user={currentUser} materials={materials} onBatchAddMaterials={handleBatchAddMaterials} onUpdateProject={handleUpdateProject} concretes={concretes} onReplaceConcreteDesign={handleReplaceConcreteDesign} /></Suspense>} />
 
                         <Route path="*" element={<Navigate to="/" replace />} />
                     </Routes>
