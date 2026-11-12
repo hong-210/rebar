@@ -6,7 +6,8 @@ import { BatchUploadResult, BuildingConfig, ConcreteEntry, MaterialEntry, Member
 import { useLocation } from 'react-router-dom';
 import { ZoneEditor } from './ZoneEditor';
 import type { SabBody, SabModel, SabProgress } from '../utils/sabParser';
-import { StoredModelMeta, LoadedModel, listModels, saveModelParts, loadModel, deleteModel } from '../utils/modelStorage';
+import { StoredModelMeta, LoadedModel, listModels, saveModelParts, loadModel, deleteModel, saveDrawings } from '../utils/modelStorage';
+import type { ParsedDrawing } from '../utils/vdcl';
 import type { ModelMember, RebarCsvResult } from '../utils/rebarCsv';
 import { buildDesignEntries } from '../utils/modelQuantities';
 import { ConcCsvResult, ModelConcMember, buildConcreteEntries, memberVolume } from '../utils/concreteModel';
@@ -73,6 +74,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
     const [classFilter, setClassFilter] = useState<ClassFilter>('all');
     // '3d' 진척 모델 / 'zones' 층별 구역 평면 (지하주차장처럼 층 안을 구역으로 나눠 볼 때)
     const [viewMode, setViewMode] = useState<'3d' | 'zones'>('3d');
+    const [drawingsVersion, setDrawingsVersion] = useState(0); // 도면을 새로 올리면 구역 평면이 다시 읽는다
     const [picked, setPicked] = useState<SabBody | null>(null);
 
     const containerRef = useRef<HTMLDivElement>(null);
@@ -405,8 +407,14 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
         const conc = qtyFiles.find(f => /\.csv$/i.test(f.name) && /conc/i.test(f.name));
         const rebarFiles = qtyFiles.filter(f => f !== conc);
         const csv = rebarFiles.find(f => /rebar/i.test(f.name)) ?? rebarFiles.find(f => /\.xlsx?$/i.test(f.name)) ?? rebarFiles[0];
-        if (!sab && !csv && !conc) {
-            setError('빌더허브 .sab(형상) 파일이나 물량 파일(_rebar.csv, _conc.csv 또는 산출서 엑셀)을 골라 주세요.');
+        // 빌더허브 DrawingData 폴더의 층별 참조 도면 (구역 평면 배경)
+        const drawingFiles = files.filter(f => /\.vdcl$/i.test(f.name));
+        if (!sab && !csv && !conc && !drawingFiles.length) {
+            setError('빌더허브 .sab(형상) 파일이나 물량 파일(_rebar.csv, _conc.csv 또는 산출서 엑셀), 도면(.vdcl)을 골라 주세요.');
+            return;
+        }
+        if (!sab && !csv && !conc && (selectedDong === NEW_DONG || !building)) {
+            setError('도면은 모델을 올린 동을 고른 뒤 올려 주세요.');
             return;
         }
         if (selectedDong === NEW_DONG && !csv && !conc) {
@@ -415,16 +423,18 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
         }
         setError('');
         setNotice('');
-        setBusy(sab ? { label: '모델 변환 중', ratio: 0 } : { label: '물량 파일 읽는 중' });
+        setBusy(sab ? { label: '모델 변환 중', ratio: 0 } : csv || conc ? { label: '물량 파일 읽는 중' } : { label: '도면 읽는 중' });
         const worker = new Worker(new URL('../utils/sabWorker.ts', import.meta.url), { type: 'module' });
         worker.onmessage = async (e: MessageEvent) => {
-            const msg = e.data as ({ type: 'progress'; stage?: 'csv' } & SabProgress)
-                | { type: 'done'; model?: SabModel; quantities?: RebarCsvResult; concrete?: ConcCsvResult }
+            const msg = e.data as ({ type: 'progress'; stage?: 'csv' | 'drawing'; name?: string } & SabProgress)
+                | { type: 'done'; model?: SabModel; quantities?: RebarCsvResult; concrete?: ConcCsvResult; drawings: ParsedDrawing[]; skippedDrawings: string[] }
                 | { type: 'error'; message: string };
             if (msg.type === 'progress') {
                 setBusy(msg.stage === 'csv'
                     ? { label: '물량 파일 읽는 중' }
-                    : { label: `모델 변환 중 (부재 ${msg.bodies.toLocaleString()}개)`, ratio: msg.ratio });
+                    : msg.stage === 'drawing'
+                        ? { label: `도면 읽는 중: ${msg.name}` }
+                        : { label: `모델 변환 중 (부재 ${msg.bodies.toLocaleString()}개)`, ratio: msg.ratio });
                 return;
             }
             worker.terminate();
@@ -433,7 +443,17 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                 setError(`읽기 실패: ${msg.message}`);
                 return;
             }
-            const { model: sabModel, quantities, concrete } = msg;
+            const { model: sabModel, quantities, concrete, drawings, skippedDrawings } = msg;
+            const skippedNote = skippedDrawings.length ? ` (건너뛴 도면 ${skippedDrawings.length}장: 원본 도면·빈 도면)` : '';
+            // 도면만 올린 경우: 고른 동에 바로 저장
+            if (!sab && !csv && !conc) {
+                if (!drawings.length) { setError(`올릴 수 있는 층별 도면이 없습니다.${skippedNote} 파일 이름이 '건물_층번호_이름.vdcl' 형식인지 확인하세요.`); return; }
+                await saveDrawings(currentProject.id, selectedDong, drawings);
+                await refreshModels();
+                setDrawingsVersion(v => v + 1);
+                setNotice(`층별 도면 ${drawings.length}장을 올렸습니다${skippedNote}. '구역 평면 (층별)'에서 배경으로 볼 수 있습니다.`);
+                return;
+            }
             if (sabModel && sabModel.bodies.length === 0) {
                 setError('파일에서 부재를 찾지 못했습니다. 빌더허브 모델의 .sab 파일인지 확인하세요.');
                 return;
@@ -495,6 +515,10 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                     csv: members && csv ? { fileName: csv.name, members } : undefined,
                     conc: concMembers && concFile ? { fileName: concFile.name, members: concMembers } : undefined,
                 });
+                if (drawings.length) {
+                    await saveDrawings(currentProject.id, target.name, drawings);
+                    setDrawingsVersion(v => v + 1);
+                }
                 await refreshModels();
                 if (target.name !== selectedDong) setSelectedDong(target.name);
                 else setModel({
@@ -510,7 +534,8 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                 setBusy(null);
             }
 
-            if (!finalMembers.length && !concMembers) setNotice('형상만 올렸습니다. 같은 폴더의 _rebar.csv나 산출서 엑셀을 올리면 실행 물량과 층 정보가 추가됩니다.');
+            if (drawings.length) setNotice(`층별 도면 ${drawings.length}장도 함께 올렸습니다${skippedNote}.`);
+            else if (!finalMembers.length && !concMembers) setNotice('형상만 올렸습니다. 같은 폴더의 _rebar.csv나 산출서 엑셀을 올리면 실행 물량과 층 정보가 추가됩니다.');
             else if (!finalBodies.length) setNotice('물량만 올렸습니다. 같은 폴더의 .sab를 올리면 3D 형상이 추가됩니다.');
 
             // 4. 새 물량이면 이 동의 실행 물량을 모델 기준으로 바꿀지 묻는다
@@ -522,7 +547,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
             setBusy(null);
             setError(`읽기 실패: ${e.message}`);
         };
-        worker.postMessage({ sab, csv, conc });
+        worker.postMessage({ sab, csv, conc, drawings: drawingFiles });
     };
 
     const handleDelete = async () => {
@@ -563,7 +588,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                             <input
                                 ref={fileInputRef}
                                 type="file"
-                                accept=".sab,.csv,.xlsx,.xls"
+                                accept=".sab,.csv,.xlsx,.xls,.vdcl"
                                 multiple
                                 className="hidden"
                                 onChange={e => {
@@ -575,10 +600,10 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                             <button
                                 onClick={() => fileInputRef.current?.click()}
                                 disabled={!!busy || !selectedDong}
-                                title="Models 폴더의 .sab(형상)와 물량 파일(_rebar.csv, _conc.csv 또는 산출서 엑셀) - 함께 또는 따로"
+                                title="Models 폴더의 .sab(형상)·물량 파일(_rebar.csv, _conc.csv 또는 산출서 엑셀), DrawingData 폴더의 층별 도면(.vdcl) - 함께 또는 따로"
                                 className="flex items-center gap-1.5 px-3 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium whitespace-nowrap hover:bg-blue-700 disabled:opacity-50"
                             >
-                                <UploadCloud size={16} /> 모델 올리기 (.sab / 물량 CSV·엑셀)
+                                <UploadCloud size={16} /> 모델 올리기 (.sab / 물량 / 도면)
                             </button>
                             {model?.members?.length || model?.concMembers?.length ? (
                                 <button
@@ -645,6 +670,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                     bodyClasses={bodyClasses}
                     materials={materials}
                     canEdit={canEdit}
+                    drawingsVersion={drawingsVersion}
                 />
             ) : null}
             <div className={`flex-1 grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-4 min-h-[560px] ${viewMode === 'zones' && model?.bodies.length ? 'hidden' : ''}`}>
@@ -782,7 +808,7 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                         {storedModel && (
                             <p className="text-[11px] text-slate-400 mt-2 flex items-start gap-1">
                                 <Info size={12} className="mt-0.5 shrink-0" />
-                                형상 {storedModel.fileName ? `${storedModel.fileName} (부재 ${storedModel.bodyCount.toLocaleString()}개, ${(storedModel.storedBytes / 1e6).toFixed(1)} MB)` : '없음'} · 철근 {storedModel.csvFileName ?? '없음'} · 콘크리트 {storedModel.concFileName ?? '없음'} · {new Date(storedModel.uploadedAt).toLocaleDateString()}
+                                형상 {storedModel.fileName ? `${storedModel.fileName} (부재 ${storedModel.bodyCount.toLocaleString()}개, ${(storedModel.storedBytes / 1e6).toFixed(1)} MB)` : '없음'} · 철근 {storedModel.csvFileName ?? '없음'} · 콘크리트 {storedModel.concFileName ?? '없음'} · 도면 {storedModel.drawingNames?.length ?? 0}장 · {new Date(storedModel.uploadedAt).toLocaleDateString()}
                             </p>
                         )}
                     </div>

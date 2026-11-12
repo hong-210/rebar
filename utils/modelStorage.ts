@@ -1,6 +1,7 @@
 import type { SabBody, SabModel } from './sabParser';
 import type { ModelMember } from './rebarCsv';
 import type { ModelConcMember } from './concreteModel';
+import type { ParsedDrawing } from './vdcl';
 
 // 변환한 3D 모델은 동마다 이 브라우저의 IndexedDB에 저장한다 (서버 연동 전까지 공유되지 않음).
 // 목록은 가벼운 meta 저장소에서 읽고, 형상(꼭짓점)은 gzip으로 압축해 data 저장소에 따로 둔다.
@@ -27,6 +28,8 @@ export interface StoredModelMeta {
     // 콘크리트 물량(_conc.csv 또는 산출서 conc 시트)을 올렸을 때 (부재별 실행 체적)
     concFileName?: string;
     concVolume?: number;
+    // 빌더허브 층별 참조 도면(.vdcl) 이름 (구역 평면 배경)
+    drawingNames?: string[];
 }
 
 interface StoredModelData {
@@ -157,5 +160,43 @@ export async function deleteModel(projectId: string, dong: string): Promise<void
     await run([META, DATA], 'readwrite', tx => {
         tx.objectStore(META).delete(key);
         tx.objectStore(DATA).delete(key);
+        tx.objectStore(DATA).delete(drawingsKey(key));
     });
+}
+
+// --- 층별 참조 도면: 같은 data 저장소에 '키|drawings'로 따로 둔다 (형상·물량과 별개로 올리고 지운다) ---
+const drawingsKey = (key: string) => `${key}|drawings`;
+
+export async function loadDrawings(projectId: string, dong: string): Promise<ParsedDrawing[]> {
+    return (await run<ParsedDrawing[] | undefined>([DATA], 'readonly', tx => tx.objectStore(DATA).get(drawingsKey(modelKey(projectId, dong))))) ?? [];
+}
+
+// 같은 층·이름 도면은 새 것으로 바꾸고 나머지는 둔다
+export async function saveDrawings(projectId: string, dong: string, drawings: ParsedDrawing[]): Promise<ParsedDrawing[]> {
+    const key = modelKey(projectId, dong);
+    const old = await loadDrawings(projectId, dong);
+    const id = (d: ParsedDrawing) => `${d.floorNo}|${d.name}`;
+    const incoming = new Set(drawings.map(id));
+    const merged = [...old.filter(d => !incoming.has(id(d))), ...drawings].sort((a, b) => a.floorNo - b.floorNo || a.name.localeCompare(b.name));
+    const meta = await run<StoredModelMeta | undefined>([META], 'readonly', tx => tx.objectStore(META).get(key));
+    await run([META, DATA], 'readwrite', tx => {
+        tx.objectStore(DATA).put(merged, drawingsKey(key));
+        tx.objectStore(META).put({
+            ...(meta ?? { key, projectId, dong, bodyCount: 0, triangleCount: 0, storedBytes: 0 }),
+            uploadedAt: new Date().toISOString(),
+            drawingNames: merged.map(d => d.name),
+        });
+    });
+    return merged;
+}
+
+export async function deleteDrawing(projectId: string, dong: string, floorNo: number, name: string): Promise<ParsedDrawing[]> {
+    const key = modelKey(projectId, dong);
+    const rest = (await loadDrawings(projectId, dong)).filter(d => !(d.floorNo === floorNo && d.name === name));
+    const meta = await run<StoredModelMeta | undefined>([META], 'readonly', tx => tx.objectStore(META).get(key));
+    await run([META, DATA], 'readwrite', tx => {
+        tx.objectStore(DATA).put(rest, drawingsKey(key));
+        if (meta) tx.objectStore(META).put({ ...meta, drawingNames: rest.map(d => d.name) });
+    });
+    return rest;
 }

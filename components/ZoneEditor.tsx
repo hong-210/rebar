@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { MousePointer2, PenLine, Trash2, Copy, Maximize, AlertTriangle, Link2Off, X } from 'lucide-react';
+import { MousePointer2, PenLine, Trash2, Copy, Maximize, AlertTriangle, Link2Off, X, Layers } from 'lucide-react';
 import { BuildingConfig, MaterialEntry, MemberClass, Project } from '../types';
-import type { LoadedModel } from '../utils/modelStorage';
+import { LoadedModel, loadDrawings, deleteDrawing } from '../utils/modelStorage';
+import { ParsedDrawing, shortLayerName } from '../utils/vdcl';
+import { DEFAULT_HIDDEN, KEY_LAYERS, buildDrawingIndex, snapToDrawing } from '../utils/drawingIndex';
 import { floorLabel, lowestFloorOf } from '../utils/floorBasis';
 import { floorOrder } from '../utils/progress';
 import { collectDrawings, loadDrawingOverrides } from '../utils/shopCheck';
@@ -20,7 +22,20 @@ interface ZoneEditorProps {
     bodyClasses: MemberClass[];  // 부재마다 수평/수직
     materials: MaterialEntry[];
     canEdit: boolean;
+    drawingsVersion: number;     // 도면을 새로 올리면 바뀐다
 }
+
+// 배경 도면 선택·숨긴 레이어는 이 브라우저에 기억 (층마다 / 도면마다)
+const BG_KEY = 'rbm_v2_zoneBackground';
+const readStore = (): { bg: Record<string, string>; hidden: Record<string, string[]>; showModel?: boolean } => {
+    try { return { bg: {}, hidden: {}, ...JSON.parse(localStorage.getItem(BG_KEY) || '{}') }; } catch { return { bg: {}, hidden: {} }; }
+};
+const writeStore = (patch: (st: ReturnType<typeof readStore>) => void) => {
+    try { const st = readStore(); patch(st); localStorage.setItem(BG_KEY, JSON.stringify(st)); } catch { /* 무시 */ }
+};
+const drawingId = (d: ParsedDrawing) => `${d.floorNo}|${d.name}`;
+// SHOP 기준 층 'B3' → 빌더허브 층 번호 -3, '2F' → 2
+const floorNoOf = (f: string) => (/^B(\d+)$/.test(f) ? -Number(f.slice(1)) : parseInt(f));
 
 // 평면 보기: 화면 = (x·scale + ox, −y·scale + oy)
 interface View { scale: number; ox: number; oy: number }
@@ -31,6 +46,7 @@ const COLOR_OVERLAP = '#dc2626';  // 두 구역 이상에 든 부재
 const COLOR_EMPTY = '#e2e8f0';    // 실행 물량이 없는 부재
 
 type Mode = 'select' | 'draw';
+type SnapKind = 'vertex' | 'edge' | 'close' | 'intersection' | 'endpoint' | 'dedge' | null;
 
 interface FloorBody {
     index: number;
@@ -45,7 +61,7 @@ interface FloorBody {
 const fmtT = (t: number) => (t >= 100 ? t.toFixed(0) : t.toFixed(1));
 const pct = (shop: number, plan: number) => (plan > 0 ? `${Math.round((shop / plan) * 100)}%` : shop > 0 ? 'SHOP만' : '-');
 
-export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong, model, bodyFloors, bodyClasses, materials, canEdit }) => {
+export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong, model, bodyFloors, bodyClasses, materials, canEdit, drawingsVersion }) => {
     const [zones, setZones] = useState<ZoneArea[]>(() => loadZones(project.id, dong));
     useEffect(() => { setZones(loadZones(project.id, dong)); }, [project.id, dong]);
     const commit = (next: ZoneArea[]) => { setZones(next); saveZones(project.id, dong, next); };
@@ -57,7 +73,7 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
     const [mode, setMode] = useState<Mode>('select');
     const [snapOn, setSnapOn] = useState(true);
     const [drawPts, setDrawPts] = useState<Pt[]>([]);
-    const [cursor, setCursor] = useState<{ p: Pt; snapped: 'vertex' | 'edge' | 'close' | null } | null>(null);
+    const [cursor, setCursor] = useState<{ p: Pt; snapped: SnapKind } | null>(null);
     const [selectedId, setSelectedId] = useState<string | null>(null);
     const [renamingId, setRenamingId] = useState<string | null>(null);
     const [showFree, setShowFree] = useState(false);
@@ -67,6 +83,49 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
     const [size, setSize] = useState({ w: 800, h: 600 });
 
     const floorZones = useMemo(() => zones.filter(z => z.floor === floor), [zones, floor]);
+
+    // --- 배경 도면 ---
+    const [drawings, setDrawings] = useState<ParsedDrawing[]>([]);
+    useEffect(() => {
+        let cancelled = false;
+        loadDrawings(project.id, dong).then(d => { if (!cancelled) setDrawings(d); }).catch(() => setDrawings([]));
+        return () => { cancelled = true; };
+    }, [project.id, dong, drawingsVersion]);
+    const [store, setStore] = useState(readStore);
+    const updateStore = (patch: (st: ReturnType<typeof readStore>) => void) => { writeStore(patch); setStore(readStore()); };
+    const showModel = store.showModel !== false;
+    const [layerPanel, setLayerPanel] = useState(false);
+    const bgKey = `${project.id}|${dong}|${floor}`;
+    // 고른 적이 없으면: 같은 층 도면 중 끊어치기·구간 → 구조 → 선이 많은 순. 같은 층 도면이 없으면 한 층 위(기초는 B3F 도면에 그려지는 경우)
+    const defaultBg = useMemo(() => {
+        const n = floorNoOf(floor);
+        for (const target of [n, n + 1]) {
+            const same = drawings.filter(d => d.floorNo === target);
+            if (!same.length) continue;
+            const score = (d: ParsedDrawing) => (/끊어치기|구간/.test(d.name) ? 3 : /구조/.test(d.name) ? 2 : 0) * 1e9 + d.segLayer.length;
+            return drawingId([...same].sort((a, b) => score(b) - score(a))[0]);
+        }
+        return '';
+    }, [drawings, floor]);
+    const bgId = store.bg[bgKey] ?? defaultBg;
+    const bg = drawings.find(d => drawingId(d) === bgId);
+    const hiddenLayers = useMemo(() => {
+        if (!bg) return new Set<string>();
+        const saved = store.hidden[drawingId(bg)];
+        return new Set(saved ?? bg.layers.filter(l => DEFAULT_HIDDEN.test(l)));
+    }, [bg, store]);
+    const bgIndex = useMemo(() => (bg ? buildDrawingIndex(bg, hiddenLayers) : null), [bg, hiddenLayers]);
+    const setHidden = (next: Set<string>) => bg && updateStore(st => { st.hidden[drawingId(bg)] = Array.from(next); });
+    const layerCounts = useMemo(() => {
+        const c = new Map<number, number>();
+        bg?.segLayer.forEach(l => c.set(l, (c.get(l) ?? 0) + 1));
+        bg?.texts.forEach(t => c.set(t.l, (c.get(t.l) ?? 0) + 1));
+        return c;
+    }, [bg]);
+    const removeDrawing = async () => {
+        if (!bg || !confirm(`도면 '${bg.name}'을(를) 이 동에서 지울까요?`)) return;
+        setDrawings(await deleteDrawing(project.id, dong, bg.floorNo, bg.name));
+    };
     const colorOf = (z: ZoneArea) => ZONE_COLORS[zones.indexOf(z) % ZONE_COLORS.length];
 
     // --- 이 층 부재: 평면 모양·중심·실행 물량 ---
@@ -192,7 +251,7 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
     const toWorld = (sx: number, sy: number): Pt => [(sx - view.ox) / view.scale, -(sy - view.oy) / view.scale];
 
     // --- 스냅: 그리는 중인 첫 점(닫기) → 기존 구역 꼭짓점 → 기존 구역 선 ---
-    const snap = (raw: Pt, shift: boolean): { p: Pt; snapped: 'vertex' | 'edge' | 'close' | null } => {
+    const snap = (raw: Pt, shift: boolean): { p: Pt; snapped: SnapKind } => {
         let p = raw;
         const last = drawPts[drawPts.length - 1];
         if (shift && last) {
@@ -212,6 +271,9 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
             if (d < bestD) { bestD = d; best = v; }
         }
         if (best) return { p: [best[0], best[1]], snapped: 'vertex' };
+        // 배경 도면: 축선 교점·끝점 (구역 선보다 먼저, 선 위 스냅은 구역 선 다음)
+        const ds = bgIndex ? snapToDrawing(bgIndex, p, tol) : null;
+        if (ds && ds.kind !== 'edge') return { p: ds.p, snapped: ds.kind };
         bestD = tol * 0.8;
         for (const z of floorZones) {
             for (let i = 0; i < z.points.length; i++) {
@@ -220,10 +282,8 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
                 if (d < bestD) { bestD = d; best = q; }
             }
         }
-        if (best) {
-            // 수평·수직 고정 중이면 선 위의 점 중 고정 방향과 맞는 점을 쓴다
-            return { p: best, snapped: 'edge' };
-        }
+        if (best) return { p: best, snapped: 'edge' };
+        if (ds) return { p: ds.p, snapped: 'dedge' };
         return { p, snapped: null };
     };
 
@@ -253,7 +313,7 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
         ctx.save();
         ctx.setTransform(dpr * view.scale, 0, 0, -dpr * view.scale, dpr * view.ox, dpr * view.oy);
         const zoneColor = new Map(floorZones.map(z => [z.id, colorOf(z)]));
-        for (const b of bodies) {
+        for (const b of showModel ? bodies : []) {
             const ids = assign.get(b.index) ?? [];
             let color: string;
             if (ids.length > 1) color = COLOR_OVERLAP;
@@ -264,7 +324,33 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
             ctx.fillStyle = color;
             ctx.fill(b.path);
         }
+        // 배경 도면 선 (1px)
+        if (bgIndex) {
+            ctx.globalAlpha = showModel ? 0.75 : 0.9;
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 1 / view.scale;
+            bgIndex.paths.forEach(path => ctx.stroke(path));
+        }
         ctx.restore();
+        // 도면 글자 (화면에서 6px 이상일 때만)
+        if (bgIndex && bg) {
+            ctx.globalAlpha = 0.85;
+            ctx.fillStyle = '#334155';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'alphabetic';
+            let drawn = 0;
+            for (const t of bg.texts) {
+                if (!bgIndex.visible[t.l]) continue;
+                const px = t.h * view.scale;
+                if (px < 6) continue;
+                const [x, y] = toScreen([t.x, t.y]);
+                if (x < -200 || y < -50 || x > size.w + 50 || y > size.h + 50) continue;
+                ctx.font = `${Math.min(px, 28)}px sans-serif`;
+                ctx.fillText(t.s, x, y);
+                if (++drawn > 4000) break;
+            }
+            ctx.globalAlpha = 1;
+        }
 
         // 구역 다각형
         ctx.globalAlpha = 1;
@@ -314,15 +400,18 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
         // 스냅 표시
         if (mode === 'draw' && cursor?.snapped) {
             const [x, y] = toScreen(cursor.p);
-            ctx.strokeStyle = cursor.snapped === 'close' ? '#16a34a' : cursor.snapped === 'vertex' ? '#dc2626' : '#2563eb';
+            const k = cursor.snapped;
+            ctx.strokeStyle = k === 'close' ? '#16a34a' : k === 'vertex' ? '#dc2626' : k === 'intersection' ? '#ea580c' : k === 'endpoint' ? '#9333ea' : '#2563eb';
             ctx.lineWidth = 2;
             ctx.beginPath();
-            if (cursor.snapped === 'edge') { ctx.moveTo(x - 7, y); ctx.lineTo(x + 7, y); ctx.moveTo(x, y - 7); ctx.lineTo(x, y + 7); }
+            if (k === 'edge' || k === 'dedge') { ctx.moveTo(x - 7, y); ctx.lineTo(x + 7, y); ctx.moveTo(x, y - 7); ctx.lineTo(x, y + 7); }
+            else if (k === 'intersection') { ctx.moveTo(x - 7, y - 7); ctx.lineTo(x + 7, y + 7); ctx.moveTo(x + 7, y - 7); ctx.lineTo(x - 7, y + 7); }
+            else if (k === 'endpoint') { ctx.arc(x, y, 6, 0, Math.PI * 2); }
             else ctx.rect(x - 6, y - 6, 12, 12);
             ctx.stroke();
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [size, view, bodies, assign, floorZones, drawPts, cursor, selectedId, showFree, mode, zones]);
+    }, [size, view, bodies, assign, floorZones, drawPts, cursor, selectedId, showFree, mode, zones, bgIndex, bg, showModel]);
 
     // --- 마우스 ---
     const drag = useRef<{ x: number; y: number; ox: number; oy: number; moved: boolean } | null>(null);
@@ -433,6 +522,21 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
                         )}
                     </div>
                     <label className="flex items-center gap-1 text-slate-600"><input type="checkbox" checked={snapOn} onChange={e => setSnapOn(e.target.checked)} /> 스냅</label>
+                    <label className="flex items-center gap-1 text-slate-600"><input type="checkbox" checked={showModel} onChange={e => updateStore(st => { st.showModel = e.target.checked; })} /> 모델 부재</label>
+                    <select
+                        value={bgId}
+                        onChange={e => updateStore(st => { st.bg[bgKey] = e.target.value; })}
+                        className="px-2 py-1 border border-slate-300 rounded text-slate-700 max-w-[220px]"
+                        title="빌더허브 DrawingData 폴더의 층별 도면 (모델 올리기에서 .vdcl 파일을 올리면 추가)"
+                    >
+                        <option value="">배경 도면 없음</option>
+                        {drawings.map(d => <option key={drawingId(d)} value={drawingId(d)}>{d.name}</option>)}
+                    </select>
+                    {bg && (
+                        <button onClick={() => setLayerPanel(!layerPanel)} className={`flex items-center gap-1 px-2 py-1 rounded ${layerPanel ? 'bg-slate-700 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
+                            <Layers size={13} /> 레이어
+                        </button>
+                    )}
                     <button onClick={fit} className="flex items-center gap-1 px-2 py-1 text-slate-600 hover:bg-slate-100 rounded"><Maximize size={13} /> 전체 보기</button>
                     {canEdit && otherFloorsWithZones.length > 0 && (
                         <select value="" onChange={e => e.target.value && copyFrom(e.target.value)} className="px-2 py-1 border border-slate-300 rounded text-slate-600">
@@ -452,13 +556,40 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
                         onPointerLeave={() => setCursor(null)}
                         onContextMenu={e => e.preventDefault()}
                     />
+                    {layerPanel && bg && (
+                        <div className="absolute right-3 top-3 bottom-3 w-72 bg-white/95 rounded-lg border border-slate-200 shadow-md flex flex-col text-xs">
+                            <div className="p-2 border-b border-slate-100 flex items-center gap-2">
+                                <span className="font-bold text-slate-700 flex-1 truncate">{bg.name} 레이어</span>
+                                <button onClick={() => setLayerPanel(false)} className="text-slate-400"><X size={14} /></button>
+                            </div>
+                            <div className="p-2 border-b border-slate-100 flex flex-wrap gap-2">
+                                <button className="text-blue-600" onClick={() => setHidden(new Set())}>모두 켜기</button>
+                                <button className="text-blue-600" onClick={() => setHidden(new Set(bg.layers))}>모두 끄기</button>
+                                <button className="text-blue-600" onClick={() => setHidden(new Set(bg.layers.filter(l => !KEY_LAYERS.test(l))))}>주요만 (기둥·벽·축선·끊어치기)</button>
+                                {canEdit && <button className="text-red-600 ml-auto" onClick={removeDrawing}>도면 지우기</button>}
+                            </div>
+                            <div className="flex-1 overflow-y-auto p-1">
+                                {bg.layers.map((l, i) => ({ l, i, n: layerCounts.get(i) ?? 0 })).filter(x => x.n > 0).sort((a, b) => b.n - a.n).map(({ l, n }) => (
+                                    <label key={l} className="flex items-center gap-1.5 px-1 py-0.5 hover:bg-slate-50 rounded" title={l}>
+                                        <input
+                                            type="checkbox"
+                                            checked={!hiddenLayers.has(l)}
+                                            onChange={e => { const next = new Set(hiddenLayers); if (e.target.checked) next.delete(l); else next.add(l); setHidden(next); }}
+                                        />
+                                        <span className="flex-1 truncate">{shortLayerName(l)}</span>
+                                        <span className="text-slate-400">{n.toLocaleString()}</span>
+                                    </label>
+                                ))}
+                            </div>
+                        </div>
+                    )}
                     <div className="absolute left-3 bottom-3 bg-white/90 rounded-lg border border-slate-200 px-3 py-2 text-[11px] text-slate-600 space-y-0.5 pointer-events-none">
                         {mode === 'draw' ? (
                             <>
                                 <p className="font-bold text-slate-700">구역 그리기</p>
                                 <p>클릭: 점 찍기 · 첫 점(초록)을 누르거나 Enter: 닫기</p>
                                 <p>Shift: 수평/수직 · Backspace: 마지막 점 취소 · Esc: 취소</p>
-                                <p>스냅: <span className="text-red-600">■</span> 꼭짓점 <span className="text-blue-600">+</span> 기존 선 <span className="text-green-600">■</span> 닫기</p>
+                                <p>스냅: <span className="text-red-600">■</span> 구역 꼭짓점 <span className="text-orange-600">✕</span> 도면 교점 <span className="text-purple-600">○</span> 도면 끝점 <span className="text-blue-600">+</span> 선 위 <span className="text-green-600">■</span> 닫기</p>
                             </>
                         ) : (
                             <p>드래그: 이동 · 휠: 확대/축소 · 구역 클릭: 선택 · Delete: 선택 구역 삭제</p>
