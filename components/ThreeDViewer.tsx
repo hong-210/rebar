@@ -4,6 +4,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Box, UploadCloud, Trash2, Loader2, Info, X, RefreshCw, CheckCircle2 } from 'lucide-react';
 import { BatchUploadResult, BuildingConfig, ConcreteEntry, MaterialEntry, MemberClass, Project, UploadMode, User } from '../types';
 import { useLocation } from 'react-router-dom';
+import { ZoneEditor } from './ZoneEditor';
 import type { SabBody, SabModel, SabProgress } from '../utils/sabParser';
 import { StoredModelMeta, LoadedModel, listModels, saveModelParts, loadModel, deleteModel } from '../utils/modelStorage';
 import type { ModelMember, RebarCsvResult } from '../utils/rebarCsv';
@@ -70,6 +71,8 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
     const [notice, setNotice] = useState('');
     const [selectedFloor, setSelectedFloor] = useState<string | null>(null);
     const [classFilter, setClassFilter] = useState<ClassFilter>('all');
+    // '3d' 진척 모델 / 'zones' 층별 구역 평면 (지하주차장처럼 층 안을 구역으로 나눠 볼 때)
+    const [viewMode, setViewMode] = useState<'3d' | 'zones'>('3d');
     const [picked, setPicked] = useState<SabBody | null>(null);
 
     const containerRef = useRef<HTMLDivElement>(null);
@@ -619,7 +622,32 @@ export const ThreeDViewer: React.FC<ThreeDViewerProps> = ({ currentProject, user
                 </div>
             )}
 
-            <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-4 min-h-[560px]">
+            {!!model?.bodies.length && (
+                <div className="flex items-center gap-3">
+                    <div className="flex bg-slate-100 p-1 rounded-lg text-sm">
+                        <button onClick={() => setViewMode('3d')} className={`px-4 py-1.5 rounded-md font-medium ${viewMode === '3d' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>3D 진척</button>
+                        <button onClick={() => setViewMode('zones')} className={`px-4 py-1.5 rounded-md font-medium ${viewMode === 'zones' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>구역 평면 (층별)</button>
+                    </div>
+                    <span className="text-xs text-slate-500">
+                        {viewMode === 'zones'
+                            ? '층마다 구역(구간·동 주변)을 그려 구역별 실행 ↔ SHOP을 비교합니다. 구역 이름이 SHOP 도면명의 구역과 같으면 자동으로 연결됩니다.'
+                            : '기준층처럼 층 단위로 보는 동은 3D 진척, 지하주차장처럼 층 안을 나눠 보는 동은 구역 평면을 쓰세요.'}
+                    </span>
+                </div>
+            )}
+            {viewMode === 'zones' && model?.bodies.length ? (
+                <ZoneEditor
+                    project={currentProject}
+                    building={building}
+                    dong={selectedDong}
+                    model={model}
+                    bodyFloors={bodyFloors}
+                    bodyClasses={bodyClasses}
+                    materials={materials}
+                    canEdit={canEdit}
+                />
+            ) : null}
+            <div className={`flex-1 grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-4 min-h-[560px] ${viewMode === 'zones' && model?.bodies.length ? 'hidden' : ''}`}>
                 <div className="relative bg-slate-50 rounded-xl border border-slate-200 overflow-hidden min-h-[420px]">
                     <div ref={containerRef} className="absolute inset-0" />
 

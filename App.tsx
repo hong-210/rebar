@@ -12,6 +12,7 @@ import { Dashboard } from './components/Dashboard';
 import { ProjectSettings } from './components/ProjectSettings';
 import { MaterialInput } from './components/MaterialInput';
 import { ConcreteInput } from './components/ConcreteInput';
+import { ShopCheck } from './components/ShopCheck';
 import { HistoryLogViewer } from './components/HistoryLog';
 import { Login } from './components/Login';
 import { ProjectList } from './components/ProjectList';
@@ -843,6 +844,7 @@ export default function App() {
                                 />
                             } 
                         />
+                        <Route path="/input/shop-check" element={<ShopCheck currentProject={currentProject} materials={materials} />} />
                         <Route path="/input/shop" 
                             element={
                                 <MaterialInput 

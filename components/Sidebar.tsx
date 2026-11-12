@@ -113,6 +113,17 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentProject, user, onExitPr
                                 <CornerDownRight size={14} className="opacity-50" />
                                 SHOP 물량
                             </Link>
+                            <Link 
+                                to="/input/shop-check" 
+                                className={`flex items-center gap-2 py-2 px-3 text-sm rounded-md transition-colors ${
+                                    location.pathname === '/input/shop-check' 
+                                    ? 'bg-slate-800 text-white font-semibold' 
+                                    : 'text-slate-500 hover:text-slate-300'
+                                }`}
+                            >
+                                <CornerDownRight size={14} className="opacity-50" />
+                                SHOP 점검
+                            </Link>
                         </div>
                     )}
                 </div>
