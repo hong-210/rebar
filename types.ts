@@ -80,14 +80,23 @@ export interface Project {
 export type MemberClass = 'H' | 'V';
 
 // 엑셀 업로드 방식: 교체(동 전체 비우고 새로) / 덮어쓰기(같은 항목은 새 값으로) / 추가(같은 항목은 기존 값에 더함)
-export type UploadMode = 'replace' | 'overwrite' | 'add';
+// sync: 같은 출처(파일·구글 시트 탭)에서 온 물량만 새 내용으로 맞춘다 (누적 파일을 통째로 다시 올릴 때)
+export type UploadMode = 'replace' | 'overwrite' | 'add' | 'sync';
+
+export interface SyncOptions {
+    replaceSources?: string[];   // 함께 지울 이전 출처 (파일 이름이 바뀐 갱신본)
+    clearUntaggedDongs?: string[]; // 출처 기록이 없는 예전 업로드 물량도 이 동들에서 지운다
+    clearOtherDongs?: string[];    // 이 동들의 엑셀(file:)·출처 없는 물량도 지운다 (구글 시트를 원본으로 처음 연결할 때)
+    projectId?: string;            // 반영할 물량이 없을 때(시트 탭을 비운 경우) 쓰는 프로젝트·구분
+    dataSource?: 'Design' | 'Shop';
+}
 
 export interface BatchUploadResult {
     created: number;           // 새로 추가된 물량
     replaced: number;          // 기존 물량을 새 값으로 덮어쓴 건수
     merged: number;            // 추가 모드에서 기존 물량에 더한 건수
     duplicatesRemoved: number; // 이전 업로드로 중복 저장되어 있다가 정리된 행
-    cleared: number;           // 교체 업로드로 먼저 지운 기존 물량
+    cleared: number;           // 교체·동기화 업로드로 먼저 지운 기존 물량
 }
 
 export interface MaterialEntry {
@@ -108,6 +117,11 @@ export interface MaterialEntry {
 
     // 부재 구분: 'H' 수평(슬래브·보·기초) / 'V' 수직(벽체·기둥·계단 등). 엑셀에서 알 수 없으면 비어 있다.
     memberClass?: MemberClass;
+
+    // 어느 파일·구글 시트 탭에서 올라왔는지 (동기화 업로드의 기준). 예: 'file:1공구 지하주차장_SHOP', 'gsheet:<id>:<gid>'
+    sourceFile?: string;
+    // 엑셀 '날짜' 칸 (YYYY-MM-DD). 같은 도면·직경이라도 날짜가 다르면 따로 둔다
+    date?: string;
 
     // Version Control for Planned Quantity
     // Map of Version Name -> Weight (e.g., { 'Rev.0': 1000, 'Rev.1': 1200 })

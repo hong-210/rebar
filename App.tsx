@@ -13,6 +13,7 @@ import { ProjectSettings } from './components/ProjectSettings';
 import { MaterialInput } from './components/MaterialInput';
 import { ConcreteInput } from './components/ConcreteInput';
 import { ShopCheck } from './components/ShopCheck';
+import { SheetAutoSync } from './components/SheetAutoSync';
 import { HistoryLogViewer } from './components/HistoryLog';
 import { Login } from './components/Login';
 import { ProjectList } from './components/ProjectList';
@@ -23,7 +24,7 @@ import { OrderManagement } from './components/OrderManagement';
 import { MemberManagement } from './components/MemberManagement';
 // three.js가 커서 3D 화면을 열 때만 불러온다
 const ThreeDViewer = lazy(() => import('./components/ThreeDViewer').then(m => ({ default: m.ThreeDViewer })));
-import { Project, MaterialEntry, ConcreteEntry, HistoryLog, User, Issue, IssueStatus, Order, OrderStatus, ProjectRole, Inspection, InspectionResult, ShopDrawing, BatchUploadResult, UploadMode } from './types';
+import { Project, MaterialEntry, ConcreteEntry, HistoryLog, User, Issue, IssueStatus, Order, OrderStatus, ProjectRole, Inspection, InspectionResult, ShopDrawing, BatchUploadResult, UploadMode, SyncOptions } from './types';
 
 const errorMessage = (err: unknown) =>
     err && typeof err === 'object' && 'message' in err ? String((err as { message: unknown }).message) : String(err);
@@ -361,11 +362,38 @@ export default function App() {
     // 동/층/Zone/직경/강종/구분이 같은 기존 물량은 더하지 않고 새 값으로 덮어쓴다.
     // 이전 업로드로 같은 키의 행이 여러 개 쌓여 있었다면 하나만 남기고 정리한다.
     // replaceDongs를 주면(교체 업로드) 그 동들의 같은 구분(실행/SHOP) 기존 물량을 모두 비우고 파일 내용으로 새로 채운다.
-    const handleBatchAddMaterials = (entries: MaterialEntry[], mode: UploadMode): BatchUploadResult => {
+    const handleBatchAddMaterials = (entries: MaterialEntry[], mode: UploadMode, sync?: SyncOptions): BatchUploadResult => {
         const result: BatchUploadResult = { created: 0, replaced: 0, merged: 0, duplicatesRemoved: 0, cleared: 0 };
-        if (entries.length === 0) return result;
+        if (entries.length === 0 && mode !== 'sync') return result;
 
-        const source = entries[0].dataSource ?? 'Design';
+        const source = entries[0]?.dataSource ?? sync?.dataSource ?? 'Design';
+
+        // 동기화: 같은 출처(파일·시트 탭)에서 온 기존 물량만 지우고 새 내용으로 채운다. 다른 출처 물량은 그대로
+        if (mode === 'sync') {
+            const projectId = entries[0]?.projectId ?? sync?.projectId;
+            if (!projectId) return result;
+            const sources = new Set([...entries.map(e => e.sourceFile).filter((x): x is string => !!x), ...(sync?.replaceSources ?? [])]);
+            const untagged = new Set(sync?.clearUntaggedDongs ?? []);
+            const others = new Set(sync?.clearOtherDongs ?? []);
+            const isCleared = (m: MaterialEntry) =>
+                m.projectId === projectId && (m.dataSource ?? 'Design') === source && (
+                    (m.sourceFile ? sources.has(m.sourceFile) : untagged.has(m.dong)) ||
+                    (others.has(m.dong) && (!m.sourceFile || m.sourceFile.startsWith('file:'))));
+            const clearedIds = materials.filter(isCleared).map(m => m.id);
+            entries.forEach(entry => {
+                if (entry.dataSource !== 'Shop') entry.plannedVersions = { [currentProject?.activeVersion[entry.dong] || 'Rev.0']: entry.plannedWeight };
+            });
+            result.cleared = clearedIds.length;
+            result.created = entries.length;
+            setMaterials([...materials.filter(m => !isCleared(m)), ...entries]);
+            persist((async () => {
+                if (clearedIds.length > 0) await materialsTable.removeMany(clearedIds);
+                await materialsTable.upsert(entries);
+            })());
+            const label = source === 'Design' ? '실행' : 'SHOP';
+            addLog(projectId, 'IMPORT', `${label} 물량 동기화 (${Array.from(sources).map(s => s.replace(/^(file|gsheet):/, '')).join(', ')}) - 기존 ${result.cleared}건 → ${result.created}건`);
+            return result;
+        }
         // 교체면 파일에 든 동들의 같은 구분 기존 물량을 먼저 비운다
         const clearDongs = new Set(mode === 'replace' ? entries.map(e => e.dong) : []);
         const isCleared = (m: MaterialEntry) =>
@@ -375,7 +403,7 @@ export default function App() {
         const base = materials.filter(m => !isCleared(m));
 
         const keyOf = (m: MaterialEntry) =>
-            [m.projectId, m.dong, m.floor, m.zone, m.diameter, m.strength, m.dataSource ?? 'Design', m.itemType ?? 'Rebar', m.memberClass ?? ''].join('|');
+            [m.projectId, m.dong, m.floor, m.zone, m.diameter, m.strength, m.dataSource ?? 'Design', m.itemType ?? 'Rebar', m.memberClass ?? '', m.date ?? ''].join('|');
 
         const existingByKey = new Map<string, MaterialEntry[]>();
         base.forEach(m => {
@@ -780,12 +808,19 @@ export default function App() {
     return (
         <Router>
             <div className="flex bg-slate-50 min-h-screen font-sans">
-                <Sidebar 
-                    currentProject={currentProject} 
+                <Sidebar
+                    currentProject={currentProject}
                     user={currentUser}
                     onExitProject={handleExitProject}
                 />
-                
+                {/* 구글 시트 자동 동기화: 어느 화면이든 프로젝트가 열려 있으면 돈다 */}
+                <SheetAutoSync
+                    project={currentProject}
+                    materials={materials}
+                    canEdit={['Admin', 'Participant'].includes(currentProject.members.find(m => m.userId === currentUser.email)?.role ?? '')}
+                    onBatchAddMaterials={handleBatchAddMaterials}
+                />
+
                 <main className="flex-1 ml-64 p-8 overflow-x-hidden">
                     <Routes>
                         <Route path="/" element={<Dashboard currentProject={currentProject} user={currentUser} materials={materials} onDeleteMaterialsOfDong={handleDeleteMaterialsOfDong} />} />

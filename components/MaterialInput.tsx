@@ -1,6 +1,9 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { MaterialEntry, Project, RebarDiameter, User, BuildingConfig, BatchUploadResult, UploadMode } from '../types';
+import { MaterialEntry, Project, RebarDiameter, User, BuildingConfig, BatchUploadResult, UploadMode, SyncOptions } from '../types';
+import { fileSourceKey, normalizeDate, sourceLabel, loadSheetLinks } from '../utils/googleSheet';
+import { SheetSync } from './SheetSync';
+import { BuildResult, PendingUpload, buildMaterialUpload } from '../utils/materialImport';
 import { Plus, Trash2, Calculator, FileSpreadsheet, UploadCloud, Building, GitBranch, ArrowRightLeft, X, Calendar, Download, BarChart3, Truck, Info, ChevronDown, ChevronRight, ChevronUp, Scale, Lock } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
@@ -9,25 +12,12 @@ import { normalizeRebarSpec } from '../utils/rebarSpec';
 import { getFloorAbove, lowestFloorOf, classifyMember, isFoundationMember, isFloorInBuilding, resolveNamedFloor, roofFloorsOf, topFloorOf, floorLabel } from '../utils/floorBasis';
 
 // 엑셀을 읽은 뒤 교체/덮어쓰기 선택을 기다리는 업로드
-interface PendingUpload {
-    entries: MaterialEntry[];
-    dataSource: 'Design' | 'Shop';
-    dongs: string[];
-    dongRowCounts: Record<string, number>;
-    affectedFloors: string[];
-    processedCount: number;
-    couplerRowCount: number;
-    shiftedRowCount: number; // 실행 수평재 중 한 층 위로 옮긴 행 수
-    classCounts: { H: number; V: number; none: number }; // 수평/수직/구분 없음 행 수
-    existingCount: number; // 파일에 든 동들의 같은 구분 기존 물량 건수
-}
-
 interface MaterialInputProps {
     currentProject: Project;
     user: User;
     materials: MaterialEntry[];
     onAddMaterial: (material: MaterialEntry) => void;
-    onBatchAddMaterials: (materials: MaterialEntry[], mode: UploadMode) => BatchUploadResult;
+    onBatchAddMaterials: (materials: MaterialEntry[], mode: UploadMode, sync?: SyncOptions) => BatchUploadResult;
     onDeleteMaterial: (id: string) => void;
     onDeleteAllMaterials: (projectId: string, dataSource: 'Design' | 'Shop', dong: string) => void;
     onCreateVersion: (projectId: string, versionName: string, versionDate: string, dong: string) => void;
@@ -345,12 +335,16 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
         const reader = new FileReader();
         reader.onload = (event) => {
             const bstr = event.target?.result;
-            const wb = XLSX.read(bstr, { type: 'binary' });
+            const wb = XLSX.read(bstr, { type: 'binary', cellDates: true });
             const wsname = wb.SheetNames[0];
             const ws = wb.Sheets[wsname];
             const data = XLSX.utils.sheet_to_json(ws);
-            processExcelData(data);
             if (fileInputRef.current) fileInputRef.current.value = '';
+            const r = buildUpload(data, fileSourceKey(file.name));
+            if (!r.upload) { alert(r.error); return; }
+            // 처음 올리는 동이면 바로 반영(동기화로 출처를 남긴다), 기존 물량이 있으면 방식을 고르게 한다
+            if (r.upload.existingCount > 0) openPending(r.upload);
+            else applyUpload(r.upload, 'sync');
         };
         reader.readAsBinaryString(file);
     };
@@ -360,20 +354,21 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
         const dong = selectedDong || '101동';
         // Shop일 경우 '구분' 컬럼 추가 (수평재/수직재)
         // '구성'이 커플러인 행은 값을 개수(EA)로 읽는다
-        const headers = ['동', '층', isShop ? '도면명(Zone)' : 'Zone', '직경', '강종', '구성(철근/커플러)', isShop ? '샵중량(ton) / 커플러(EA)' : '실행중량(ton) / 커플러(EA)', '구분(수평/수직)'];
+        const headers = ['동', '층', isShop ? '도면명(Zone)' : 'Zone', '직경', '강종', '구성(철근/커플러)', isShop ? '샵중량(ton) / 커플러(EA)' : '실행중량(ton) / 커플러(EA)', '구분(수평/수직)', '날짜'];
+        const today = new Date().toISOString().slice(0, 10);
 
         const examples = isShop
             ? [
-                [dong, '4F', 'S1-Slab', '25', 'SD400', '철근', 0.5, '수평'],
-                [dong, '4F', 'C1-Column', '25', 'SD400', '커플러', 120, '수직']
+                [dong, '4F', 'S1-Slab', '25', 'SD400', '철근', 0.5, '수평', today],
+                [dong, '4F', 'C1-Column', '25', 'SD400', '커플러', 120, '수직', today]
             ]
             : [
-                [dong, '4F', 'Slab', '25', 'SD400', '철근', 0.5, '수평'],
-                [dong, '4F', 'Column', '25', 'SD400', '커플러', 120, '수직']
+                [dong, '4F', 'Slab', '25', 'SD400', '철근', 0.5, '수평', ''],
+                [dong, '4F', 'Column', '25', 'SD400', '커플러', 120, '수직', '']
             ];
 
         const ws = XLSX.utils.aoa_to_sheet([headers, ...examples]);
-        ws['!cols'] = [{wch: 10}, {wch: 6}, {wch: 14}, {wch: 6}, {wch: 8}, {wch: 18}, {wch: 26}, {wch: 16}];
+        ws['!cols'] = [{wch: 10}, {wch: 6}, {wch: 14}, {wch: 6}, {wch: 8}, {wch: 18}, {wch: 26}, {wch: 16}, {wch: 12}];
         const guide = XLSX.utils.aoa_to_sheet([
             ['항목', '작성 방법'],
             ['구성', "철근이면 '철근', 커플러면 '커플러'로 적습니다. 비워 두면 철근으로 봅니다."],
@@ -382,6 +377,8 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
             ['직경', '커플러도 직경(예: 25)을 적어야 합니다. 직경이 없는 행은 건너뜁니다.'],
             ['내진(S)', "직경에 S를 붙이거나(D22S) 강종에 붙이면(SD600S) 모두 'D22 / SD600S'로 같게 반영됩니다. 강종 숫자 없이 S만 적거나(강종 'S') 직경에만 S가 있으면(22S) '미기재(S)'로 반영됩니다."],
             ['강종', "적으면 철근·커플러 모두 그대로 반영됩니다. 비워 두면 '미기재'로 표시됩니다."],
+            ['날짜', "SHOP 반입일·작성일 등 (예: 2026-11-05). 같은 도면·직경이라도 날짜가 다르면 따로 저장됩니다. 비워도 됩니다."],
+            ['누적 관리', "한 파일에 날짜를 적어 아래로 계속 추가하고, 파일 전체를 다시 올리면서 '파일 기준 동기화'를 고르면 새로 추가·수정된 행만 반영되고 중복되지 않습니다. 구글 시트를 연결해도 같은 방식으로 반영됩니다."],
             ['구분', isShop
                 ? "SHOP 물량은 적힌 층 그대로 집계됩니다. (슬래브는 그 층 바닥 기준)"
                 : "슬래브·보·기초 등은 '수평', 기둥·벽체·계단 등은 '수직'으로 적습니다. 실행의 수평재는 천장 기준이라 한 층 위로 올려 SHOP과 같은 기준으로 집계됩니다. (B3F 수평 → B2F, 최하층·기초는 그대로)"]
@@ -394,9 +391,9 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
     };
 
     // 읽어 둔 엑셀 물량을 반영한다. replace면 파일에 든 동들의 같은 구분 기존 물량을 비우고 새로 채우고, add면 기존 값에 더한다.
-    const applyUpload = (upload: PendingUpload, mode: UploadMode) => {
+    const applyUpload = (upload: PendingUpload, mode: UploadMode, sync?: SyncOptions) => {
         setPendingUpload(null);
-        const result = onBatchAddMaterials(upload.entries, mode);
+        const result = onBatchAddMaterials(upload.entries, mode, sync);
         setExpandedFloors(prev => {
             const next = new Set(prev);
             upload.affectedFloors.forEach(f => next.add(f));
@@ -413,279 +410,32 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
         const { H, V, none } = upload.classCounts;
         const classInfo = `\n(부재 구분: 수평 ${H}행 / 수직 ${V}행${none > 0 ? ` / 구분 없음 ${none}행 → 3D 모델에서 층 전체 진척으로 표시` : ''})`;
         const couplerInfo = upload.couplerRowCount > 0 ? `\n(그중 커플러 ${upload.couplerRowCount}행: '구성' 칸 기준, 개수(EA)로 따로 저장)` : '';
-        const applied = mode === 'replace'
+        const applied = mode === 'sync'
+            ? `- 동기화 (${sourceLabel(upload.source)}): 같은 출처 기존 ${label} 물량 ${result.cleared}건을 정리하고 ${result.created}건 반영\n- 다른 파일·시트에서 온 물량은 그대로`
+            : mode === 'replace'
             ? `- 교체: 기존 ${label} 물량 ${result.cleared}건 삭제 후 ${result.created}건 새로 반영`
             : (mode === 'add'
                 ? `- 신규 ${result.created}건\n- 기존 물량에 더하기 ${result.merged}건 (같은 동/층/Zone/직경/강종은 기존 값 + 파일 값)`
                 : `- 신규 ${result.created}건\n- 기존 물량 덮어쓰기 ${result.replaced}건 (같은 동/층/Zone/직경/강종은 누적하지 않음)`)
                 + (result.duplicatesRemoved > 0 ? `\n- 이전 업로드로 중복 저장된 물량 ${result.duplicatesRemoved}건 정리` : '');
-        alert(`[${upload.dataSource} 모드] 처리 완료!${logicInfo}${classInfo}\n\n총 ${upload.processedCount}행 유효 데이터 -> ${upload.entries.length}개 항목으로 집계됨.${couplerInfo}\n(중량 단위: TON -> 내부 KG 변환 저장)\n\n[반영]\n${applied}\n\n[결과]\n${dongSummary}`);
+        const dateInfo = (upload.dateRowCount > 0 ? `\n(날짜 칸이 있는 행 ${upload.dateRowCount}행: 날짜별로 따로 저장)` : '')
+            + Object.entries(upload.rerouted).map(([k, c]) => `\n(지하층 ${c}행: ${k} - 그 동에 해당 층 실행 물량이 없어 지하주차장 실행과 비교되도록 보냄)`).join('');
+        alert(`[${upload.dataSource} 모드] 처리 완료!${logicInfo}${classInfo}${dateInfo}\n\n총 ${upload.processedCount}행 유효 데이터 -> ${upload.entries.length}개 항목으로 집계됨.${couplerInfo}\n(중량 단위: TON -> 내부 KG 변환 저장)\n\n[반영]\n${applied}\n\n[결과]\n${dongSummary}`);
     };
 
-    // 엑셀의 동 이름을 프로젝트 기준 설정의 동과 맞춘다 ('101' / '101 동' -> '101동')
-    const findBuilding = (rawDong: string): BuildingConfig | undefined => {
-        const normalize = (s: string) => s.replace(/\s/g, '').replace(/동$/, '').toUpperCase();
-        return currentProject.buildings.find(b => b.name === rawDong)
-            ?? currentProject.buildings.find(b => normalize(b.name) === normalize(rawDong));
-    };
+    // 엑셀·구글 시트 행을 물량 항목으로 묶는다 (공용 함수, 반영은 applyUpload / 시트 동기화)
+    const buildUpload = (data: any[], source: string, opts: { lenient?: boolean } = {}): BuildResult =>
+        buildMaterialUpload(data, source, { project: currentProject, materials, dataSource: activeTab === 'design' ? 'Design' : 'Shop', defaultDong: selectedDong }, opts);
 
-    const processExcelData = (data: any[]) => {
-        let processedCount = 0;
-        const affectedFloors = new Set<string>();
-        
-        // 1. Determine Mode & DataSource
-        // Important: STRICT separation based on activeTab
-        const isDesignMode = activeTab === 'design';
-        const dataSource = isDesignMode ? 'Design' : 'Shop';
-
-        console.log(`[RebarMaster] Processing Excel for mode: ${dataSource}`);
-
-        // Aggregation Map: Key = Dong-Floor-Zone-Diameter-Strength
-        const aggregationMap = new Map<string, MaterialEntry>();
-        
-        // 2. Configure Strict Keywords (User Requested)
-        const config = isDesignMode ? {
-            // 실행 물량: [층번호, 시공존, 값, 철근강종, 철근직경]
-            floor: ['층번호', '층', 'Floor'],
-            zone: ['시공존', '부위', '부위명', 'Zone'],
-            weight: ['값', '실행물량', '설계물량', '설계중량', '내역중량', '총중량', '중량', 'Weight', '실행중량(ton)'], // '값' priority
-            dia: ['철근직경', '직경', 'Dia', '규격'],
-            strength: ['철근강종', '강종', 'Grade'],
-            dong: ['동', 'Dong'],
-            standard: ['위치분류', '구분', '부재구분', '부재', '부재명', 'MemberType'],
-            component: ['구성']
-        } : {
-            // SHOP 물량: [동, 층, 도면명, 직경, 강종, 샵중량, 구분]
-            floor: ['층', '층번호', 'Floor'],
-            zone: ['도면명', '샵도면명', 'DrawingName', 'Mark', 'Zone', '부위'],
-            weight: ['샵중량', '샵중량(ton)', '샵중량(kg)', '중량', 'Weight', 'ShopWeight'], // '샵중량' priority
-            dia: ['직경', '철근직경', 'Dia', '규격'],
-            strength: ['강종', '철근강종', 'Grade'],
-            dong: ['동', 'Building', 'Dong'],
-            standard: ['구분', '기준', 'Classification', 'MemberType', 'Type'],
-            component: ['구성']
-        };
-
-        const targetDongCounts: Record<string, number> = {};
-        let couplerRowCount = 0;
-        let shiftedRowCount = 0;
-        const classCounts = { H: 0, V: 0, none: 0 };
-
-        // 기준 설정과 맞지 않는 행 (사유 -> 행 수). 하나라도 있으면 업로드 전체를 막는다.
-        const rejected = new Map<string, number>();
-        const rejectRow = (reason: string) => rejected.set(reason, (rejected.get(reason) ?? 0) + 1);
-
-        data.forEach((row: any) => {
-            const getValue = (keywords: string[]) => {
-                if (keywords.length === 0) return null;
-                const rowKeys = Object.keys(row);
-                // 1. Exact match (case insensitive, trimmed)
-                for (const keyword of keywords) {
-                    const match = rowKeys.find(k => k.trim().toLowerCase() === keyword.toLowerCase());
-                    if (match && row[match] !== undefined) return row[match];
-                }
-                // 2. Fuzzy match (remove whitespace, parens)
-                for (const keyword of keywords) {
-                    const cleanKeyword = keyword.toLowerCase().replace(/[\s()]/g, '');
-                    const match = rowKeys.find(k => k.toLowerCase().replace(/[\s()]/g, '').includes(cleanKeyword));
-                    if (match && row[match] !== undefined) return row[match];
-                }
-                return null;
-            };
-
-            // DONG
-            let dongStr = getValue(config.dong);
-            if (!dongStr && selectedDong) dongStr = selectedDong;
-
-            // FLOOR PARSING (-1 -> B1, 1 -> 1F)
-            let floorRaw = getValue(config.floor);
-            let floor = '';
-
-            if (floorRaw !== null) {
-                const fStr = String(floorRaw).trim().toUpperCase();
-                const numVal = parseInt(fStr);
-                
-                // PIT·RF·PHF처럼 이름으로 적힌 층은 동을 찾은 뒤 기준 설정의 지붕층 이름으로 바꾼다
-                // Pure Number Case: -1 => B1, 1 => 1F
-                if (!isNaN(numVal) && String(numVal) === fStr) {
-                    if (numVal < 0) floor = `B${Math.abs(numVal)}`;
-                    else if (numVal > 0) floor = `${numVal}F`;
-                    else floor = '1F'; // 0 -> 1F fallback
-                } 
-                else {
-                    // String Case: "지하1층" => "B1"
-                    const numbers = fStr.replace(/[^0-9]/g, '');
-                    if (numbers) {
-                        if (fStr.includes('B') || fStr.includes('-') || fStr.includes('지하') || fStr.includes('BASE')) {
-                            floor = `B${numbers}`;
-                        } else {
-                            floor = `${numbers}F`;
-                        }
-                    }
-                }
-            }
-
-            // ZONE
-            const zoneRaw = getValue(config.zone);
-            // In Shop mode, default to General if missing. In Design, default to General.
-            const zone = zoneRaw || 'General';
-
-            // '구성' 칸에 커플러라고 적힌 행은 철근이 아니라 커플러이고, 값은 개수(EA)다
-            // SHOP 업체가 커플러를 '구분' 칸에 적는 경우도 함께 본다
-            const isCouplerRow = /커플러|coupler/i.test(`${getValue(config.component) ?? ''} ${getValue(config.standard) ?? ''}`);
-            const itemType = isCouplerRow ? 'Coupler' : 'Rebar';
-
-            // DIAMETER / GRADE PARSING
-            // 'D22S'처럼 직경에 붙은 내진 표시 S는 강종으로 옮긴다 (SHOP D22S + SD600 -> D22 / SD600S, 실행과 같은 기준)
-            const { diameter: diaEnum, strength: cleanStrength } =
-                normalizeRebarSpec(getValue(config.dia), getValue(config.strength));
-
-            // WEIGHT PARSING (Handle commas: "1,200")
-            const rawWeight = getValue(config.weight);
-            let valueWeight = 0;
-            if (rawWeight !== null) {
-                 const weightStr = String(rawWeight).replace(/,/g, '').trim();
-                 valueWeight = parseFloat(weightStr);
-                 if (isNaN(valueWeight)) valueWeight = 0;
-            }
-
-            // 직경이나 중량이 없는 행(빈 행, 합계 행 등)은 물량이 아니므로 건너뛴다
-            if (!diaEnum || !(valueWeight > 0)) return;
-
-            // 동/층이 프로젝트 기준 설정과 맞는지 확인한다
-            const rawDong = String(dongStr ?? '').trim();
-            const building = findBuilding(rawDong);
-            if (!building) {
-                rejectRow(`동 '${rawDong || '(빈칸)'}': 기준 설정에 없는 동`);
-                return;
-            }
-            const namedFloor = resolveNamedFloor(building, String(floorRaw ?? ''));
-            if (!floor && !namedFloor) {
-                rejectRow(`${building.name} 층 '${floorRaw ?? '(빈칸)'}': 인식할 수 없는 층 표기 (지붕층 이름: ${roofFloorsOf(building).join(', ')})`);
-                return;
-            }
-
-            const cleanDong = building.name;
-            const cleanZone = String(zone);
-
-            // PIT는 최하층(B{지하층수}), RF·PHF 등은 기준 설정의 지붕층 순서대로 지상층수 + 1층부터
-            let cleanFloor = namedFloor ?? String(floor);
-            const lowestFloor = lowestFloorOf(building);
-
-            // 수평재(슬래브·보·기초) / 수직재(벽체·기둥·계단) 구분은 3D 모델 색칠에도 쓴다
-            const memberText = `${getValue(config.standard) ?? ''} ${zone}`;
-            const memberClass = classifyMember(memberText);
-
-            // SHOP 층은 그대로 두고, 실행 수평재만 한 층 위로 올린다 (최하층·기초는 그대로)
-            if (dataSource === 'Design') {
-                if (memberClass === 'H' && !isFoundationMember(memberText) && cleanFloor !== lowestFloor) {
-                    cleanFloor = getFloorAbove(cleanFloor);
-                    shiftedRowCount++;
-                }
-            }
-
-            if (!isFloorInBuilding(building, cleanFloor)) {
-                const shiftNote = cleanFloor !== floor ? ` (엑셀 ${floor} → ${cleanFloor})` : '';
-                rejectRow(`${cleanDong} ${cleanFloor}${shiftNote}: 기준 설정 범위(지하 ${building.basementFloors}층 ~ 지상 ${building.groundFloors}층 + 지붕 ${roofFloorsOf(building).join(', ')}) 밖`);
-                return;
-            }
-
-            // Convert Input TON to KG (커플러는 개수 그대로)
-            const weightKg = isCouplerRow ? 0 : valueWeight * 1000;
-            const count = isCouplerRow ? valueWeight : 0;
-
-            const uniqueKey = `${cleanDong}|${cleanFloor}|${cleanZone}|${diaEnum}|${cleanStrength}|${itemType}|${memberClass ?? ''}`;
-
-            if (aggregationMap.has(uniqueKey)) {
-                const existingEntry = aggregationMap.get(uniqueKey)!;
-                if (isCouplerRow) {
-                    if (dataSource === 'Design') existingEntry.plannedQuantity += count;
-                    else existingEntry.shopQuantity += count;
-                } else if (dataSource === 'Design') {
-                    existingEntry.plannedWeight += weightKg;
-                } else {
-                    existingEntry.shopWeight += weightKg;
-                }
-                // Round to 2 decimals to avoid float errors
-                existingEntry.plannedWeight = Math.round(existingEntry.plannedWeight * 100) / 100;
-                existingEntry.shopWeight = Math.round(existingEntry.shopWeight * 100) / 100;
-            } else {
-                let pWeight = 0; let sWeight = 0;
-                if (dataSource === 'Design') pWeight = weightKg;
-                else sWeight = weightKg;
-
-                const newEntry: MaterialEntry = {
-                    id: Math.random().toString(36).substr(2, 9),
-                    projectId: currentProject.id,
-                    dong: cleanDong,
-                    floor: cleanFloor,
-                    zone: cleanZone,
-                    diameter: diaEnum,
-                    strength: cleanStrength,
-                    lengthMm: 0,
-                    dataSource: dataSource,
-                    ...(isCouplerRow ? { itemType: 'Coupler' as const } : {}),
-                    ...(memberClass ? { memberClass } : {}),
-                    plannedQuantity: dataSource === 'Design' ? count : 0,
-                    plannedWeight: Number(pWeight.toFixed(2)),
-                    shopQuantity: dataSource === 'Shop' ? count : 0,
-                    shopWeight: Number(sWeight.toFixed(2)),
-                    plannedVersions: {},
-                    lastUpdated: new Date().toLocaleDateString()
-                };
-                aggregationMap.set(uniqueKey, newEntry);
-            }
-
-            processedCount++;
-            classCounts[memberClass ?? 'none']++;
-            if (isCouplerRow) couplerRowCount++;
-            if (cleanDong === selectedDong) {
-                affectedFloors.add(cleanFloor);
-            }
-            
-            if (!targetDongCounts[cleanDong]) targetDongCounts[cleanDong] = 0;
-            targetDongCounts[cleanDong]++;
-        });
-
-        if (rejected.size > 0) {
-            const total = Array.from(rejected.values()).reduce((a, c) => a + c, 0);
-            const lines = Array.from(rejected.entries()).map(([reason, count]) => `- ${reason} (${count}행)`);
-            const shown = lines.slice(0, 15).join('\n') + (lines.length > 15 ? `\n... 외 ${lines.length - 15}종류` : '');
-            alert(`업로드를 중단했습니다. 이 파일의 물량은 하나도 반영되지 않았습니다.\n\n프로젝트 기준 설정과 맞지 않는 행이 ${total}행 있습니다.\n${shown}\n\n프로젝트 설정에서 동/층수를 맞추거나 엑셀을 수정한 뒤 다시 올려주세요.`);
-            return;
-        }
-
-        const newEntries = Array.from(aggregationMap.values());
-
-        if (newEntries.length > 0) {
-            const upload: PendingUpload = {
-                entries: newEntries,
-                dataSource,
-                dongs: Object.keys(targetDongCounts),
-                dongRowCounts: targetDongCounts,
-                affectedFloors: Array.from(affectedFloors),
-                processedCount,
-                couplerRowCount,
-                shiftedRowCount,
-                classCounts,
-                existingCount: 0
-            };
-            upload.existingCount = materials.filter(m =>
-                m.projectId === currentProject.id &&
-                upload.dongs.includes(m.dong) &&
-                (m.dataSource ?? 'Design') === dataSource
-            ).length;
-
-            // 파일에 든 동에 기존 물량이 있으면 교체할지 덮어쓸지 고르게 한다
-            if (upload.existingCount > 0) setPendingUpload(upload);
-            else applyUpload(upload, 'overwrite');
-        } else {
-            const requiredKeys = isDesignMode 
-                ? `필수 컬럼: ${config.zone[0]}, ${config.weight[0]}, ${config.floor[0]}, ${config.dia[0]}`
-                : `필수 컬럼: ${config.zone[0]}, ${config.weight[0]}, ${config.floor[0]}, ${config.dia[0]}`;
-
-            alert(`데이터 처리 실패: 유효한 데이터를 찾지 못했습니다.\n\n[현재 모드: ${dataSource}]\n엑셀 파일을 확인해주세요.\n\n${requiredKeys}\n\n*중량 값은 0보다 커야 하며, 공란일 경우 제외됩니다.`);
-        }
+    // 업로드 방식 창: 동기화 기준(이전 출처)과 예전 업로드 정리 여부를 정해 둔다
+    const [syncPrev, setSyncPrev] = useState('');
+    const [clearUntagged, setClearUntagged] = useState(false);
+    const openPending = (upload: PendingUpload) => {
+        setSyncPrev('');
+        // 출처 기록이 아직 하나도 없는 동이면(예전 방식으로만 올렸으면) 정리를 기본으로
+        const taggedInDongs = materials.some(m => m.projectId === currentProject.id && m.sourceFile && upload.dongs.includes(m.dong) && (m.dataSource ?? 'Design') === upload.dataSource);
+        setClearUntagged(upload.untaggedCount > 0 && !taggedInDongs);
+        setPendingUpload(upload);
     };
 
     // Version Comparision Logic
@@ -990,6 +740,15 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                             </div>
                         )}
 
+                        <SheetSync
+                            projectId={currentProject.id}
+                            dataSource="Design"
+                            materials={materials}
+                            canEdit={canEdit}
+                            buildUpload={buildUpload}
+                            onApply={(entries, sync) => onBatchAddMaterials(entries, 'sync', sync)}
+                        />
+
                         <div className="mb-6"><CouplerSummaryTable items={dongMaterials} title={`${selectedDong} 커플러 (실행 / SHOP 비교)`} /></div>
 
                         {canEdit && renderInputControls('design')}
@@ -1127,6 +886,15 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                             </div>
                         )}
 
+                        <SheetSync
+                            projectId={currentProject.id}
+                            dataSource="Shop"
+                            materials={materials}
+                            canEdit={canEdit}
+                            buildUpload={buildUpload}
+                            onApply={(entries, sync) => onBatchAddMaterials(entries, 'sync', sync)}
+                        />
+
                         <div className="mb-6"><CouplerSummaryTable items={dongMaterials} title={`${selectedDong} 커플러 (실행 / SHOP 비교)`} /></div>
 
                         {canEdit && renderInputControls('shop')}
@@ -1175,7 +943,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                                                     <table className="w-full text-xs text-left">
                                                         <thead className="bg-white text-slate-500 border-b border-slate-100">
                                                             <tr>
-                                                                <th className="px-4 py-2">입력일자 (Date)</th>
+                                                                <th className="px-4 py-2">날짜 (없으면 입력일)</th>
                                                                 <th className="px-4 py-2">도면명 (Drawing/Zone)</th>
                                                                 <th className="px-4 py-2 text-center">DIA</th>
                                                                 <th className="px-4 py-2 text-center">GRADE</th>
@@ -1186,7 +954,7 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                                                         <tbody className="divide-y divide-slate-50">
                                                             {fm.map((item) => (
                                                                 <tr key={item.id} className="hover:bg-blue-50/10">
-                                                                    <td className="px-4 py-2 text-slate-500 font-mono">{item.lastUpdated}</td>
+                                                                    <td className="px-4 py-2 text-slate-500 font-mono" title={item.sourceFile ? `출처: ${sourceLabel(item.sourceFile, loadSheetLinks(currentProject.id))}` : undefined}>{item.date ?? item.lastUpdated}</td>
                                                                     <td className="px-4 py-2 font-bold text-slate-700">{item.zone}{isCoupler(item) && <span className="ml-2 px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 text-[10px] font-bold">커플러</span>}</td>
                                                                     <td className="px-4 py-2 text-center text-slate-600 font-mono">{item.diameter}</td>
                                                                     <td className="px-4 py-2 text-center text-slate-500 text-xs">{item.strength}</td>
@@ -1241,6 +1009,41 @@ export const MaterialInput: React.FC<MaterialInputProps> = ({
                                 <p><span className="font-bold">이 동들의 기존 {pendingUpload.dataSource === 'Design' ? '실행' : 'SHOP'} 물량:</span> {pendingUpload.existingCount.toLocaleString()}건</p>
                             </div>
                             <div className="space-y-2">
+                                <div className="rounded-lg border-2 border-blue-600 p-3 space-y-2">
+                                    <button
+                                        onClick={() => applyUpload(pendingUpload, 'sync', {
+                                            replaceSources: syncPrev ? [syncPrev] : [],
+                                            clearUntaggedDongs: clearUntagged ? pendingUpload.dongs : []
+                                        })}
+                                        className="w-full text-left px-4 py-3 rounded-lg bg-blue-600 text-white hover:bg-blue-700"
+                                    >
+                                        <span className="block font-bold text-sm">파일 기준 동기화 (누적 파일을 다시 올릴 때 추천)</span>
+                                        <span className="block text-xs text-blue-100">이 파일에서 전에 올라온 물량만 새 내용으로 맞춥니다. 새 행은 추가되고, 같은 행은 중복되지 않으며, 고친 행은 바로잡힙니다. 다른 파일·시트에서 온 물량은 그대로입니다.</span>
+                                    </button>
+                                    <p className="text-[11px] text-slate-600">
+                                        출처: <b>{sourceLabel(pendingUpload.source)}</b>
+                                        {pendingUpload.sourceCounts.find(c => c.key === pendingUpload.source)
+                                            ? ` · 이전에 올린 ${pendingUpload.sourceCounts.find(c => c.key === pendingUpload.source)!.count}건을 새 내용으로 바꿉니다`
+                                            : ' · 처음 올리는 파일입니다'}
+                                    </p>
+                                    {pendingUpload.sourceCounts.some(c => c.key !== pendingUpload.source) && (
+                                        <label className="block text-[11px] text-slate-600">
+                                            이름이 바뀐 갱신본이면 이전 파일도 함께 바꾸기:
+                                            <select value={syncPrev} onChange={e => setSyncPrev(e.target.value)} className="mt-1 w-full px-2 py-1 border border-slate-300 rounded text-xs">
+                                                <option value="">(없음)</option>
+                                                {pendingUpload.sourceCounts.filter(c => c.key !== pendingUpload.source).map(c => (
+                                                    <option key={c.key} value={c.key}>{sourceLabel(c.key, loadSheetLinks(currentProject.id))} · {c.count}건</option>
+                                                ))}
+                                            </select>
+                                        </label>
+                                    )}
+                                    {pendingUpload.untaggedCount > 0 && (
+                                        <label className="flex items-start gap-1.5 text-[11px] text-slate-600">
+                                            <input type="checkbox" checked={clearUntagged} onChange={e => setClearUntagged(e.target.checked)} className="mt-0.5" />
+                                            <span>출처 기록이 없는 예전 업로드 물량 {pendingUpload.untaggedCount.toLocaleString()}건({pendingUpload.dongs.join(', ')})도 지우기. 같은 내용을 예전 방식으로 올렸다면 켜야 중복되지 않습니다.</span>
+                                        </label>
+                                    )}
+                                </div>
                                 <button
                                     onClick={() => applyUpload(pendingUpload, 'replace')}
                                     className="w-full text-left px-4 py-3 rounded-lg bg-blue-600 text-white hover:bg-blue-700"
