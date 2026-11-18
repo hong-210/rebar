@@ -11,7 +11,20 @@ export interface ZoneArea {
     floor: string;   // 'B3', 'B4' ... (SHOP 기준 층)
     name: string;    // '7-1번구간', '205동 주변' ('/'로 다른 이름을 함께 적을 수 있다: '4번구간 / 214동 주변')
     points: Pt[];
+    cls?: 'H' | 'V';  // 수평(슬래브·보·기초) / 수직(기둥·벽) 구역. 없으면 둘 다
 }
+
+export type ZoneClass = 'all' | 'H' | 'V';
+export const zoneClassOf = (z: ZoneArea): ZoneClass => z.cls ?? 'all';
+export const ZONE_CLASS_LABEL: Record<ZoneClass, string> = { all: '전체', H: '수평재', V: '수직재' };
+
+// 구역이 이 부재(수직이면 true)를 받는지
+export const zoneAccepts = (z: ZoneArea, vertical: boolean) => !z.cls || (z.cls === 'V') === vertical;
+// SHOP 도면 계열 → 받을 수 있는 구역 (기타는 아무 구역)
+export const zoneAcceptsFamily = (z: ZoneArea, fam: Family) =>
+    !z.cls || fam === '기타' || (z.cls === 'V' ? fam === '수직' : fam === '기초' || fam === '보·슬래브');
+// 보기 구분에 이 구역을 보일지
+export const zoneVisibleIn = (z: ZoneArea, view: ZoneClass) => view === 'all' || !z.cls || z.cls === view;
 
 // 이 브라우저에 프로젝트·동별로 저장 (서버 연동 전까지)
 const KEY = 'rbm_v2_zones';

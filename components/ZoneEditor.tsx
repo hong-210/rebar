@@ -8,8 +8,8 @@ import { floorLabel, lowestFloorOf } from '../utils/floorBasis';
 import { floorOrder } from '../utils/progress';
 import { collectDrawings, loadDrawingOverrides } from '../utils/shopCheck';
 import {
-    FAMILIES, Family, Pt, ZONE_COLORS, ZoneArea, closestOnSegment, dist, loadZones, modelFamily, pointInPolygon,
-    polygonCenter, saveZones, shopFamily, zoneMatchesArea
+    FAMILIES, Family, Pt, ZONE_CLASS_LABEL, ZONE_COLORS, ZoneArea, ZoneClass, closestOnSegment, dist, loadZones, modelFamily,
+    pointInPolygon, polygonCenter, saveZones, shopFamily, zoneAccepts, zoneAcceptsFamily, zoneClassOf, zoneMatchesArea, zoneVisibleIn
 } from '../utils/zones';
 import { newId } from '../utils/id';
 
@@ -27,7 +27,7 @@ interface ZoneEditorProps {
 
 // 배경 도면 선택·숨긴 레이어는 이 브라우저에 기억 (층마다 / 도면마다)
 const BG_KEY = 'rbm_v2_zoneBackground';
-const readStore = (): { bg: Record<string, string>; hidden: Record<string, string[]>; showModel?: boolean } => {
+const readStore = (): { bg: Record<string, string>; hidden: Record<string, string[]>; showModel?: boolean; view?: ZoneClass } => {
     try { return { bg: {}, hidden: {}, ...JSON.parse(localStorage.getItem(BG_KEY) || '{}') }; } catch { return { bg: {}, hidden: {} }; }
 };
 const writeStore = (patch: (st: ReturnType<typeof readStore>) => void) => {
@@ -42,7 +42,6 @@ interface View { scale: number; ox: number; oy: number }
 
 const SNAP_PX = 12;
 const COLOR_FREE = '#94a3b8';     // 실행 물량이 있는데 구역에 안 든 부재
-const COLOR_OVERLAP = '#dc2626';  // 두 구역 이상에 든 부재
 const COLOR_EMPTY = '#e2e8f0';    // 실행 물량이 없는 부재
 
 type Mode = 'select' | 'draw';
@@ -94,6 +93,11 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
     const [store, setStore] = useState(readStore);
     const updateStore = (patch: (st: ReturnType<typeof readStore>) => void) => { writeStore(patch); setStore(readStore()); };
     const showModel = store.showModel !== false;
+    // 보기·그리기 구분: 수직이면 기둥·벽 부재와 수직 구역만 보이고, 새로 그린 구역은 수직 구역이 된다
+    const zoneView: ZoneClass = store.view ?? 'all';
+    const setView3 = (v: ZoneClass) => { updateStore(st => { st.view = v; }); setDrawPts([]); setSelectedId(null); };
+    const visibleZones = useMemo(() => floorZones.filter(z => zoneVisibleIn(z, zoneView)), [floorZones, zoneView]);
+    const bodyVisible = (vertical: boolean) => zoneView === 'all' || (zoneView === 'V') === vertical;
     const [layerPanel, setLayerPanel] = useState(false);
     const bgKey = `${project.id}|${dong}|${floor}`;
     // 고른 적이 없으면: 같은 층 도면 중 끊어치기·구간 → 구조 → 선이 많은 순. 같은 층 도면이 없으면 한 층 위(기초는 B3F 도면에 그려지는 경우)
@@ -173,7 +177,7 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
     // --- 구역 배정 ---
     const assign = useMemo(() => {
         const zonesOf = new Map<number, string[]>(); // body index → zone ids
-        for (const b of bodies) zonesOf.set(b.index, floorZones.filter(z => pointInPolygon(b.center, z.points)).map(z => z.id));
+        for (const b of bodies) zonesOf.set(b.index, floorZones.filter(z => zoneAccepts(z, b.vertical) && pointInPolygon(b.center, z.points)).map(z => z.id));
         return zonesOf;
     }, [bodies, floorZones]);
 
@@ -182,15 +186,20 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
         type Row = { plan: Record<Family, number>; shop: Record<Family, number>; bodies: number; drawings: { name: string; ton: number; shared: boolean }[] };
         const empty = (): Record<Family, number> => ({ 기초: 0, 수직: 0, '보·슬래브': 0, 기타: 0 });
         const rows = new Map<string, Row>(floorZones.map(z => [z.id, { plan: empty(), shop: empty(), bodies: 0, drawings: [] }]));
+        // 지금 보기(전체/수평/수직)에 해당하는 부재만 합계·미지정을 센다. 구역별 실행은 보기와 관계없이 그 구역 구분대로
         let freeTon = 0, freeCount = 0, overlapCount = 0, totalTon = 0;
         for (const b of bodies) {
             const ids = assign.get(b.index) ?? [];
-            totalTon += b.ton;
-            if (ids.length === 0) { if (b.ton > 0) { freeTon += b.ton; freeCount++; } continue; }
-            if (ids.length > 1) overlapCount++;
-            const row = rows.get(ids[0])!;
-            row.plan[b.family] += b.ton;
-            row.bodies++;
+            const counted = bodyVisible(b.vertical);
+            if (counted) totalTon += b.ton;
+            if (ids.length === 0) { if (counted && b.ton > 0) { freeTon += b.ton; freeCount++; } continue; }
+            if (ids.length > 1 && counted) overlapCount++;
+            // 겹친 구역에는 모두 집계한다 (구역마다 자기 범위의 진척을 본다)
+            for (const id of ids) {
+                const row = rows.get(id)!;
+                row.plan[b.family] += b.ton;
+                row.bodies++;
+            }
         }
 
         // SHOP: 이 동·이 층의 도면별·계열별 중량 → 도면명 구역과 이름이 맞는 구역에 (여러 구역이면 실행 비율로 나눔)
@@ -209,7 +218,7 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
             const info = infoByName.get(name);
             if (!info) return;
             const fam = shopFamily(info.member);
-            const targets = floorZones.filter(z => info.areas.some(a => zoneMatchesArea(z, a)));
+            const targets = floorZones.filter(z => zoneAcceptsFamily(z, fam) && info.areas.some(a => zoneMatchesArea(z, a)));
             if (targets.length === 0) { unlinked.push({ name, ton, areas: info.areas }); return; }
             linkedTon += ton;
             const weights = targets.map(z => rows.get(z.id)!.plan[fam]);
@@ -223,7 +232,8 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
         });
         unlinked.sort((a, b) => b.ton - a.ton);
         return { rows, freeTon, freeCount, overlapCount, totalTon, unlinked, linkedTon };
-    }, [bodies, assign, floorZones, materials, project.id, dong, floor, building]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [bodies, assign, floorZones, materials, project.id, dong, floor, building, zoneView]);
 
     // --- 화면 크기·맞춤 ---
     useEffect(() => {
@@ -262,7 +272,7 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
         if (drawPts.length >= 3 && dist(p, drawPts[0]) < tol) return { p: drawPts[0], snapped: 'close' };
         if (!snapOn) return { p, snapped: null };
         let best: Pt | null = null, bestD = tol;
-        for (const z of floorZones) for (const v of z.points) {
+        for (const z of visibleZones) for (const v of z.points) {
             const d = dist(p, v);
             if (d < bestD) { bestD = d; best = v; }
         }
@@ -275,7 +285,7 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
         const ds = bgIndex ? snapToDrawing(bgIndex, p, tol) : null;
         if (ds && ds.kind !== 'edge') return { p: ds.p, snapped: ds.kind };
         bestD = tol * 0.8;
-        for (const z of floorZones) {
+        for (const z of visibleZones) {
             for (let i = 0; i < z.points.length; i++) {
                 const q = closestOnSegment(p, z.points[i], z.points[(i + 1) % z.points.length]);
                 const d = dist(p, q);
@@ -290,7 +300,7 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
     const finishPolygon = (pts: Pt[]) => {
         if (pts.length < 3) return;
         const n = floorZones.length + 1;
-        const zone: ZoneArea = { id: newId(), floor, name: `구역 ${n}`, points: pts };
+        const zone: ZoneArea = { id: newId(), floor, name: `구역 ${n}`, points: pts, ...(zoneView !== 'all' ? { cls: zoneView } : {}) };
         commit([...zones, zone]);
         setDrawPts([]);
         setSelectedId(zone.id);
@@ -314,10 +324,10 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
         ctx.setTransform(dpr * view.scale, 0, 0, -dpr * view.scale, dpr * view.ox, dpr * view.oy);
         const zoneColor = new Map(floorZones.map(z => [z.id, colorOf(z)]));
         for (const b of showModel ? bodies : []) {
-            const ids = assign.get(b.index) ?? [];
+            if (!bodyVisible(b.vertical)) continue;
+            const ids = (assign.get(b.index) ?? []).filter(id => visibleZones.some(z => z.id === id));
             let color: string;
-            if (ids.length > 1) color = COLOR_OVERLAP;
-            else if (ids.length === 1) color = zoneColor.get(ids[0])!;
+            if (ids.length) color = zoneColor.get(ids[ids.length - 1])!;
             else color = b.ton > 0 ? COLOR_FREE : COLOR_EMPTY;
             const dimmed = (selectedId && !ids.includes(selectedId)) || (showFree && ids.length > 0);
             ctx.globalAlpha = dimmed ? 0.15 : b.vertical ? 0.95 : 0.45;
@@ -352,9 +362,9 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
             ctx.globalAlpha = 1;
         }
 
-        // 구역 다각형
+        // 구역 다각형 (수직 구역은 점선)
         ctx.globalAlpha = 1;
-        for (const z of floorZones) {
+        for (const z of visibleZones) {
             const color = colorOf(z);
             const sel = z.id === selectedId;
             ctx.beginPath();
@@ -364,7 +374,9 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
             ctx.fill();
             ctx.lineWidth = sel ? 3 : 1.5;
             ctx.strokeStyle = color;
+            ctx.setLineDash(z.cls === 'V' ? [8, 4] : []);
             ctx.stroke();
+            ctx.setLineDash([]);
             for (const p of z.points) {
                 const [x, y] = toScreen(p);
                 ctx.fillStyle = color;
@@ -376,9 +388,10 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
             ctx.textBaseline = 'middle';
             ctx.lineWidth = 4;
             ctx.strokeStyle = '#ffffff';
-            ctx.strokeText(z.name, cx, cy);
+            const label = zoneView === 'all' && z.cls ? `${z.name} [${z.cls === 'V' ? '수직' : '수평'}]` : z.name;
+            ctx.strokeText(label, cx, cy);
             ctx.fillStyle = '#0f172a';
-            ctx.fillText(z.name, cx, cy);
+            ctx.fillText(label, cx, cy);
         }
 
         // 그리는 중인 선
@@ -411,7 +424,7 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
             ctx.stroke();
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [size, view, bodies, assign, floorZones, drawPts, cursor, selectedId, showFree, mode, zones, bgIndex, bg, showModel]);
+    }, [size, view, bodies, assign, floorZones, visibleZones, drawPts, cursor, selectedId, showFree, mode, zones, bgIndex, bg, showModel, zoneView]);
 
     // --- 마우스 ---
     const drag = useRef<{ x: number; y: number; ox: number; oy: number; moved: boolean } | null>(null);
@@ -448,7 +461,7 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
             return;
         }
         // 선택: 작은 구역이 위에 오도록 뒤에서부터
-        const hit = [...floorZones].reverse().find(z => pointInPolygon(world, z.points));
+        const hit = [...visibleZones].reverse().find(z => pointInPolygon(world, z.points));
         setSelectedId(hit?.id ?? null);
     };
     // 휠 확대/축소 (페이지가 스크롤되지 않게 passive가 아닌 리스너로)
@@ -511,6 +524,13 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
                     <select value={floor} onChange={e => { setFloor(e.target.value); setDrawPts([]); setSelectedId(null); }} className="px-2 py-1.5 border border-slate-300 rounded-lg text-sm font-bold">
                         {floors.map(f => <option key={f} value={f}>{floorLabel(building, f)} ({zones.filter(z => z.floor === f).length})</option>)}
                     </select>
+                    <div className="flex bg-slate-100 p-0.5 rounded-lg" title="보기·그리기 구분: 수직이면 기둥·벽 부재와 수직 구역만 보이고 새 구역은 수직 구역으로 그려집니다">
+                        {(['all', 'V', 'H'] as ZoneClass[]).map(c => (
+                            <button key={c} onClick={() => setView3(c)} className={`px-2.5 py-1 rounded-md ${zoneView === c ? 'bg-white shadow-sm text-blue-600 font-bold' : 'text-slate-500'}`}>
+                                {c === 'all' ? '전체' : c === 'V' ? '수직 (기둥·벽)' : '수평 (슬래브·보·기초)'}
+                            </button>
+                        ))}
+                    </div>
                     <div className="flex bg-slate-100 p-0.5 rounded-lg">
                         <button onClick={() => { setMode('select'); setDrawPts([]); setCursor(null); }} className={`flex items-center gap-1 px-2.5 py-1 rounded-md ${mode === 'select' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500'}`}>
                             <MousePointer2 size={13} /> 선택·이동
@@ -596,7 +616,7 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
                         )}
                         <p className="pt-1 flex flex-wrap gap-x-2">
                             <span><span className="inline-block w-2.5 h-2.5 rounded-sm align-middle mr-1" style={{ background: COLOR_FREE }} />구역 없음</span>
-                            <span><span className="inline-block w-2.5 h-2.5 rounded-sm align-middle mr-1" style={{ background: COLOR_OVERLAP }} />겹침</span>
+                            <span>수직 구역: 점선</span>
                             <span><span className="inline-block w-2.5 h-2.5 rounded-sm align-middle mr-1 border border-slate-300" style={{ background: COLOR_EMPTY }} />실행 물량 없음</span>
                         </p>
                     </div>
@@ -605,7 +625,7 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
 
             <div className="bg-white rounded-xl border border-slate-200 flex flex-col overflow-hidden">
                 <div className="p-4 border-b border-slate-100 space-y-1">
-                    <p className="text-xs text-slate-500">{dong} {floorLabel(building, floor)} · 실행 철근 (SHOP 기준 층)</p>
+                    <p className="text-xs text-slate-500">{dong} {floorLabel(building, floor)} · {zoneView === 'all' ? '전체' : ZONE_CLASS_LABEL[zoneView]} 실행 철근 (SHOP 기준 층)</p>
                     <p className="text-sm text-slate-700">
                         구역에 든 실행 <b>{fmtT(assignedTon)} t</b> / 전체 {fmtT(stats.totalTon)} t
                         <span className="text-slate-400"> ({stats.totalTon > 0 ? Math.round((assignedTon / stats.totalTon) * 100) : 0}%)</span>
@@ -616,15 +636,15 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
                         </button>
                     )}
                     {stats.overlapCount > 0 && (
-                        <p className="text-xs text-red-600 flex items-center gap-1"><AlertTriangle size={12} /> 두 구역 이상에 든 부재 {stats.overlapCount}개 (빨간색, 먼저 그린 구역에 집계)</p>
+                        <p className="text-xs text-slate-500 flex items-center gap-1"><AlertTriangle size={12} /> 두 구역 이상에 든 부재 {stats.overlapCount}개 (겹친 구역마다 모두 집계)</p>
                     )}
                     {!model.members?.length && <p className="text-xs text-amber-600">모델 물량이 없어 실행 철근을 알 수 없습니다. 물량 파일(산출서)을 올려 주세요.</p>}
                 </div>
 
                 <div className="flex-1 overflow-y-auto">
-                    {floorZones.length === 0 && (
+                    {visibleZones.length === 0 && (
                         <p className="p-4 text-sm text-slate-500">
-                            이 층에 구역이 없습니다. {canEdit ? "'구역 그리기'로 SHOP 도면의 구간 경계를 따라 그려 주세요." : ''}
+                            이 층에 {zoneView === 'all' ? '' : `${ZONE_CLASS_LABEL[zoneView]} `}구역이 없습니다. {canEdit ? "'구역 그리기'로 SHOP 도면의 구간 경계를 따라 그려 주세요." : ''}
                         </p>
                     )}
                     {(() => {
@@ -650,6 +670,19 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
                                         <span className="flex-1 min-w-0 truncate text-sm font-bold text-slate-800" onDoubleClick={() => canEdit && setRenamingId(z.id)}>{z.name}</span>
                                     )}
                                     <button onClick={() => setSelectedId(null)} className="text-slate-400 hover:text-slate-600" title="선택 해제"><X size={14} /></button>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-slate-500">구분</span>
+                                    <select
+                                        value={zoneClassOf(z)}
+                                        disabled={!canEdit}
+                                        onChange={e => commit(zones.map(x => (x.id === z.id ? { ...x, cls: e.target.value === 'all' ? undefined : (e.target.value as 'H' | 'V') } : x)))}
+                                        className="px-1.5 py-0.5 border border-slate-300 rounded"
+                                    >
+                                        <option value="all">전체 (수평+수직)</option>
+                                        <option value="V">수직재 (기둥·벽)</option>
+                                        <option value="H">수평재 (슬래브·보·기초)</option>
+                                    </select>
                                 </div>
                                 <table className="w-full">
                                     <thead className="text-slate-400"><tr><th className="text-left font-normal">부재</th><th className="text-right font-normal">실행</th><th className="text-right font-normal">SHOP</th><th className="text-right font-normal">진척</th></tr></thead>
@@ -680,8 +713,8 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
                         );
                     })()}
 
-                    {floorZones.length > 0 && <p className="px-3 pt-2 pb-1 text-[11px] font-bold text-slate-500">구역 목록 ({floorZones.length}) · SHOP / 실행</p>}
-                    {floorZones.map(z => {
+                    {visibleZones.length > 0 && <p className="px-3 pt-2 pb-1 text-[11px] font-bold text-slate-500">구역 목록 ({visibleZones.length}{visibleZones.length < floorZones.length ? ` / 이 층 ${floorZones.length}` : ''}) · SHOP / 실행</p>}
+                    {visibleZones.map(z => {
                         const row = stats.rows.get(z.id)!;
                         const plan = FAMILIES.reduce((a, f) => a + row.plan[f], 0);
                         const shop = FAMILIES.reduce((a, f) => a + row.shop[f], 0);
@@ -696,6 +729,7 @@ export const ZoneEditor: React.FC<ZoneEditorProps> = ({ project, building, dong,
                             >
                                 <span className="w-3 h-3 rounded-sm shrink-0" style={{ background: colorOf(z) }} />
                                 <span className="flex-1 min-w-0 truncate text-sm font-medium text-slate-800">{z.name}</span>
+                                {z.cls && <span className={`text-[10px] px-1 rounded ${z.cls === 'V' ? 'bg-orange-50 text-orange-700' : 'bg-sky-50 text-sky-700'}`}>{z.cls === 'V' ? '수직' : '수평'}</span>}
                                 <span className="text-xs text-slate-500 whitespace-nowrap">{fmtT(shop)}/{fmtT(plan)} t</span>
                                 <span className={`text-xs font-bold w-12 text-right ${plan > 0 && shop / plan > 1.05 ? 'text-red-600' : 'text-slate-700'}`}>{pct(shop, plan)}</span>
                             </div>
